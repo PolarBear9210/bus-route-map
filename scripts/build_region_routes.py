@@ -32,6 +32,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "web" / "data"
 BUNDLES = OUT / "bundles"
+ROUTE_STOPS = OUT / "route_stops"  # 노선별 전체 정류장. 노선 ID 끝 두 자리로 나눈 파일(웹이 노선 상세를 열 때 읽음)
 PROCESSED = ROOT / "data" / "processed"
 METRIC = "EPSG:5179"
 MIN_PASS_M = 50  # 경계를 스치는 정도의 교차는 통과로 치지 않는다
@@ -420,6 +421,16 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         }
         (BUNDLES / f"{code}.json").write_text(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
+    # 노선 상세용 전체 정류장(가상 지점 제외): {노선 ID: [[정류장 id, 이름, 번호, x, y], ...]} — 운행 순서
+    ROUTE_STOPS.mkdir(parents=True, exist_ok=True)
+    for old in ROUTE_STOPS.glob("*.json"):
+        old.unlink()
+    shards = {}
+    for rid, g in stops.sort_values("seq").groupby("rid"):
+        shards.setdefault(rid[-2:], {})[rid] = [[r.sid, r.name, str(r.ars).strip(), round(r.x, 5), round(r.y, 5)] for r in g.itertuples()]
+    for key, shard in shards.items():
+        (ROUTE_STOPS / f"{key}.json").write_text(json.dumps(shard, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
     for name, gdf, tol in [("regions_si", si[["code", "name", "sido", "sggs", "geometry"]], 30),
                            ("regions_gu", gu.rename(columns={"sgg": "code", "sggnm": "name"}), 20),
                            ("regions_dong", dong.rename(columns={"adm_cd2": "code"})[["code", "name", "sgg", "sggnm", "sido", "geometry"]], 10)]:
@@ -445,6 +456,8 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         print(f"  {f.name}  {f.stat().st_size / 1e6:.1f}MB")
     sizes = sorted(f.stat().st_size / 1e6 for f in BUNDLES.glob("*.json"))
     print(f"  bundles/ {len(sizes)}개, 합계 {sum(sizes):.1f}MB, 가장 큰 파일 {sizes[-1]:.1f}MB, 중앙값 {sizes[len(sizes) // 2]:.1f}MB")
+    sizes = sorted(f.stat().st_size / 1e6 for f in ROUTE_STOPS.glob("*.json"))
+    print(f"  route_stops/ {len(sizes)}개, 합계 {sum(sizes):.1f}MB, 가장 큰 파일 {sizes[-1]:.2f}MB")
 
 
 if __name__ == "__main__":

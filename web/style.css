@@ -184,6 +184,10 @@ ol.timeline li:first-child::before { top: 50%; }
 ol.timeline li:last-child::before { bottom: 50%; }
 ol.timeline li::after { content: ""; position: absolute; left: 0; top: 50%; width: 11px; height: 11px; margin-top: -5.5px; border-radius: 50%; background: #fff; border: 2.5px solid var(--c); box-sizing: border-box; }
 .t-ars { color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* 선택 지역 밖 정류장: 위치와 순서만 알 수 있게 흐리게 */
+ol.timeline li.off { color: var(--ink-3); }
+ol.timeline li.off::after { width: 7px; height: 7px; left: 2px; margin-top: -3.5px; border-width: 1.5px; border-color: #9aa5b1; }
+ol.timeline li:not(.off) .t-name { font-weight: 600; }
 
 /* 확대·축소 버튼은 오른쪽 아래. 결과 패널이 펼쳐져 있으면 패널 옆으로 비켜난다 */
 .leaflet-right { transition: right 0.2s; }

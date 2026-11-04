@@ -725,19 +725,10 @@ function showDetail(r) {
   state.activeRid = r.rid;
   highlight(null);
   drawArrows();
-  stopLayer.clearLayers();
-  const names = (r.sids || []).map((sid) => stations[sid]).filter(Boolean);
-  const color = TYPE_COLORS[r.typeName] || "#666";
   // 이 노선의 정류장이 잘 보이도록 나머지 흰 정류장 점은 흐리게 둔다
   map.getPane("stations").classList.add("dimmed");
-  for (const sid of r.sids || []) {
-    const s = stations[sid];
-    if (!s) continue;
-    L.circleMarker([s.y, s.x], { renderer: stopRenderer, radius: 7, color: "#fff", weight: 2.5, fillColor: color, fillOpacity: 1 })
-      .bindTooltip(`${s.name} (${s.ars})`)
-      .on("click", (e) => { L.DomEvent.stopPropagation(e); showStation(sid); })
-      .addTo(stopLayer);
-  }
+  const inRegion = (r.sids || []).map((sid) => stations[sid] && { sid, ...stations[sid] }).filter(Boolean);
+  const color = TYPE_COLORS[r.typeName] || "#666";
   const where = r.by ? "선택 지역" : "이 지역";
   const estMsg = estimated.has(r.rid)
     ? "API에 쓸 만한 경로 좌표가 없어 정류장을 순서대로 이은 추정 경로입니다. 실제 도로와 다를 수 있고 통과 판정에는 쓰지 않습니다."
@@ -756,12 +747,52 @@ function showDetail(r) {
         const h = r.by[c], nm = regionIndex[`${state.level}:${c}`].name;
         return `<li><span>${nm}</span><span>${!h ? "지나지 않음" : h.kind === "stop" ? `정차 · 정류장 ${h.sids.length}` : `통과 ${fmtLen(h.len)}`}</span></li>`;
       }).join("")}</ul>` : ""}
-    ${names.length
-      ? `<div class="group-title"><span>${where} 안 정류장</span><span class="count">${names.length}</span></div>
-         <ol class="timeline" style="--c:${color}">${names.map((s) => `<li><span class="t-name">${s.name}</span><span class="t-ars">${s.ars && s.ars !== "0" ? s.ars : ""}</span></li>`).join("")}</ol>`
-      : `<p class="d-note">${where}에서는 정차하지 않고 약 <b>${fmtLen(r.len)}</b> 지나갑니다.</p>`}`);
+    ${inRegion.length ? "" : `<p class="d-note">${where}에서는 정차하지 않고 약 <b>${fmtLen(r.len)}</b> 지나갑니다.</p>`}
+    <div id="route-stops"></div>`);
   const fit = d.querySelector(".fit");
   if (fit) fit.onclick = () => fitTo(L.latLngBounds(routeGeo[r.rid].flat()));
+  // 지역 안 정류장을 먼저 보여주고, 노선 전체 정류장을 읽어 오면 바꿔 그린다. 못 읽으면 지역 안 정류장만 남는다
+  renderRouteStops(r, inRegion, false);
+  loadRouteStops(r.rid).then((all) => { if (state.activeRid === r.rid && all.length) renderRouteStops(r, all, true); }).catch(() => {});
+}
+
+// 노선별 전체 정류장은 노선 ID 끝 두 자리로 나눈 파일에 있다
+const routeStopShards = new Map();
+function loadRouteStops(rid) {
+  const key = rid.slice(-2);
+  if (!routeStopShards.has(key)) {
+    routeStopShards.set(key, fetch(`data/route_stops/${key}.json`, { cache: "no-cache" })
+      .then((res) => { if (!res.ok) throw new Error(res.status); return res.json(); })
+      .catch((err) => { routeStopShards.delete(key); throw err; }));
+  }
+  return routeStopShards.get(key).then((shard) => (shard[rid] || []).map(([sid, name, ars, x, y]) => ({ sid, name, ars, x, y })));
+}
+
+// 노선 정류장을 지도와 목록에 그린다. 선택 지역 안은 노선 색으로 강조하고, 다른 지역은 회색으로 위치만 보여준다
+function renderRouteStops(r, list, complete) {
+  const inside = new Set(r.sids || []), color = TYPE_COLORS[r.typeName] || "#666";
+  const where = r.by ? "선택 지역" : "이 지역";
+  const arsText = (s) => (s.ars && s.ars !== "0" ? s.ars : "");
+  stopLayer.clearLayers();
+  // 강조 정류장이 위에 오도록 다른 지역 정류장을 먼저 그린다
+  for (const s of list.filter((x) => !inside.has(x.sid))) {
+    L.circleMarker([s.y, s.x], { renderer: stopRenderer, radius: 4, color: "#7b8794", weight: 1.5, fillColor: "#fff", fillOpacity: 1 })
+      .bindTooltip(`${s.name}${arsText(s) ? ` (${arsText(s)})` : ""}<br><span class="route-sub">다른 지역 정류장</span>`)
+      .on("click", (e) => L.DomEvent.stopPropagation(e)) // 지도 클릭으로 이어져 상세가 닫히지 않게 한다
+      .addTo(stopLayer);
+  }
+  for (const s of list.filter((x) => inside.has(x.sid))) {
+    L.circleMarker([s.y, s.x], { renderer: stopRenderer, radius: 7, color: "#fff", weight: 2.5, fillColor: color, fillOpacity: 1 })
+      .bindTooltip(`${s.name}${arsText(s) ? ` (${arsText(s)})` : ""}`)
+      .on("click", (e) => { L.DomEvent.stopPropagation(e); showStation(s.sid); })
+      .addTo(stopLayer);
+  }
+  const box = $("#route-stops");
+  if (!box || !list.length) { if (box) box.innerHTML = ""; return; }
+  const count = list.filter((s) => inside.has(s.sid)).length;
+  box.innerHTML = `
+    <div class="group-title"><span>${complete ? "전체 정류장" : `${where} 안 정류장`}</span><span class="count">${complete ? `${where} ${count} / 전체 ${list.length}` : list.length}</span></div>
+    <ol class="timeline" style="--c:${color}">${list.map((s) => `<li class="${inside.has(s.sid) ? "" : "off"}"><span class="t-name">${s.name}</span><span class="t-ars">${arsText(s)}</span></li>`).join("")}</ol>`;
 }
 
 // 축소했을 때 점이 뭉치지 않도록 확대 수준에 따라 크기를 바꾼다
