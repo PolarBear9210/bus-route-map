@@ -1,0 +1,9 @@
+[project]
+name = "bus-route-map"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "geopandas>=1.2.0",
+    "python-dotenv>=1.2.4",
+    "requests>=2.34.2",
+]

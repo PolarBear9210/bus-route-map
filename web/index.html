@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>지역별 버스 노선 지도</title>
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="map"></main>
+
+  <!-- 왼쪽 위: 지역 선택·필터 (접기/펴기) -->
+  <aside id="controls" class="card">
+    <div class="card-head">
+      <h1><img class="logo" src="icons/icon-64.png" width="28" height="28" alt="">지역별 버스 노선 지도</h1>
+      <span class="head-buttons">
+        <button class="toggle help-btn" id="toggle-help" aria-expanded="false" aria-controls="help" title="사용법">?</button>
+        <button class="toggle" id="toggle-controls" aria-expanded="true" aria-controls="controls-body" title="접기">▴</button>
+      </span>
+    </div>
+    <div id="controls-body">
+      <section id="help" hidden>
+        <div class="help-head"><b>사용법</b><button class="toggle" id="close-help" title="사용법 닫기">✕</button></div>
+        <dl>
+          <dt>지역 고르기</dt>
+          <dd>시도 → 시·군·구 → (시 전체 · 구 전체 · 행정동)을 고르고 <b>확인</b>. 지도에서 지역을 클릭해도 됩니다. 서울은 구까지, 경기는 시·군까지 골라야 합니다.</dd>
+          <dt>지도 클릭</dt>
+          <dd>선택된 지역 <b>안</b>을 클릭하면 선택은 그대로 두고 열린 노선·정류장 상세만 닫습니다. 선택된 지역 <b>밖</b>을 클릭하면 선택에서 벗어납니다. 선택이 없을 때 클릭하면 그 지역을 고릅니다.</dd>
+          <dt>여러 지역</dt>
+          <dd><kbd>Ctrl</kbd>/<kbd>Shift</kbd>+클릭으로 지역을 더하거나 뺍니다. 결과에서 합집합·교집합을 고를 수 있습니다.</dd>
+          <dt>경계 보기</dt>
+          <dd>지도에 그릴 경계(시·구·행정동)입니다. 지도를 클릭하면 이 단위로 지역을 고릅니다.</dd>
+          <dt>노선·정류장</dt>
+          <dd>노선을 클릭하면 상세와 운행 방향 화살표가, 정류장을 클릭하면 그 정류장에 서는 노선이 강조됩니다. <kbd>Esc</kbd>로 상세를 닫고, 한 번 더 누르면 선택을 해제합니다.</dd>
+          <dt>선 모양</dt>
+          <dd><span class="line solid"></span>정차 <span class="line dashed"></span>통과 <span class="line est"></span>추정 구간(API 경로가 없어 정류장을 이은 선, 통과 판정에 쓰지 않음)</dd>
+          <dt>패널</dt>
+          <dd>이 카드는 ▴, 오른쪽 결과는 ▸ 탭으로 접고 펼 수 있습니다.</dd>
+        </dl>
+      </section>
+
+      <div id="region-picker" class="picker">
+        <select id="pick-sido" aria-label="시도"></select>
+        <select id="pick-city" aria-label="시·군·구" disabled></select>
+        <select id="pick-dong" aria-label="시 전체, 구 또는 행정동" disabled></select>
+      </div>
+      <button id="pick-go" class="pick-go">확인</button>
+      <!-- 지도에 그릴 경계. 지도를 클릭하면 이 단위로 지역을 고른다 -->
+      <div class="level" role="radiogroup" aria-label="경계 보기">
+        <span class="level-label" title="지도에 그릴 경계입니다. 지도를 클릭하면 이 단위로 지역을 고릅니다">경계 보기</span>
+        <div class="seg">
+          <label><input type="radio" name="level" value="si"><span>시</span></label>
+          <label><input type="radio" name="level" value="gu" checked><span>구</span></label>
+          <label><input type="radio" name="level" value="dong"><span>행정동</span></label>
+        </div>
+      </div>
+
+      <section id="filters">
+        <div class="kinds" aria-label="지도 표시">
+          <label class="kind"><input type="checkbox" id="show-stop" checked><span class="line solid"></span>정차</label>
+          <label class="kind"><input type="checkbox" id="show-pass" checked><span class="line dashed"></span>통과</label>
+          <label class="kind"><input type="checkbox" id="show-stations" checked><span class="dot"></span>정류장</label>
+        </div>
+        <div id="type-filters"></div>
+        <div class="tools">
+          <label>지역 색칠
+            <select id="choro">
+              <option value="">끄기</option>
+              <option value="stop">정차 노선 수</option>
+              <option value="pass">통과 노선 수</option>
+              <option value="all">전체 노선 수</option>
+            </select>
+          </label>
+          <button id="csv-all" title="현재 단위(구/행정동)의 모든 지역을 필터 기준으로 내보냅니다">전체 지역 CSV</button>
+        </div>
+        <div id="legend" hidden></div>
+      </section>
+
+      <footer id="meta"></footer>
+    </div>
+  </aside>
+
+  <!-- 오른쪽: 지역 결과·노선/정류장 상세 (지역을 고르면 나타남, 접기/펴기) -->
+  <aside id="side" class="card" hidden>
+    <button class="toggle side-toggle" id="toggle-side" aria-expanded="true" aria-controls="side-body" title="결과 접기">▸</button>
+    <div id="side-body">
+      <section id="result"></section>
+      <section id="detail" hidden></section>
+    </div>
+  </aside>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
