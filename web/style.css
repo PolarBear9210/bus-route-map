@@ -192,6 +192,9 @@ body.side-open .leaflet-right { right: 404px; }
 .leaflet-control-zoom a { width: 34px; height: 34px; line-height: 34px; font-size: 18px; color: var(--ink); }
 .leaflet-tooltip { font-family: inherit; border-radius: 8px; border: 0; box-shadow: 0 4px 14px rgba(15, 23, 42, 0.18); padding: 6px 9px; }
 
+/* 노선 상세를 보는 동안 다른 정류장 점은 흐리게 */
+.leaflet-pane.dimmed { opacity: 0.3; }
+
 .arrow { background: none; border: 0; }
 .arrow svg { display: block; }
 

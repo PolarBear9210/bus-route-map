@@ -47,6 +47,10 @@ map.getPane("stations").style.pointerEvents = "none";
 const stationRenderer = L.svg({ pane: "stations" });
 const stationRoutes = new Map(); // sid → 그 정류장에 서는 노선 rid 집합
 const stationLayer = L.layerGroup().addTo(map);
+// 상세 보기에서 강조하는 정류장은 전용 층에 그린다. 같은 층이면 확대·축소 때 다시 그린 흰 정류장 점이 그 위를 덮는다
+map.createPane("stops").style.zIndex = 452;
+map.getPane("stops").style.pointerEvents = "none";
+const stopRenderer = L.svg({ pane: "stops" });
 const stopLayer = L.layerGroup().addTo(map);
 // 상세 보기 중인 노선의 운행 방향 화살표. 마우스 이벤트는 받지 않는다
 map.createPane("arrows").style.zIndex = 455;
@@ -152,7 +156,12 @@ function switchLevel(level) {
 // - 선택된 지역 안: 선택은 두고 열린 노선·정류장 상세만 닫는다
 // - 선택된 지역 밖(다른 지역이나 경계 밖): 선택에서 벗어난다
 // - 선택이 없을 때: 그 지역을 고른다
-map.on("click", (e) => {
+// 더블클릭 확대가 지역 클릭으로 처리되지 않도록(상세가 닫히거나 선택이 풀림) 잠깐 기다렸다가 처리한다
+let clickTimer = null;
+map.on("click", (e) => { clearTimeout(clickTimer); clickTimer = setTimeout(() => handleMapClick(e), 250); });
+map.on("dblclick", () => clearTimeout(clickTimer));
+
+function handleMapClick(e) {
   const code = regionAt(e.latlng), ev = e.originalEvent;
   const seoulSi = state.level === "si" && code === SEOUL_SI;
   if (ev.ctrlKey || ev.metaKey || ev.shiftKey) {
@@ -171,7 +180,7 @@ map.on("click", (e) => {
     return;
   }
   selectRegion(state.level, code);
-});
+}
 
 // 선택한 지역의 경계선은 updateMask()가 바깥 가림막과 함께 따로 그린다
 function regionStyle(level, code) {
@@ -681,7 +690,8 @@ function showStation(sid) {
   drawArrows();
   stopLayer.clearLayers();
   const s = stations[sid];
-  L.circleMarker([s.y, s.x], { renderer: stationRenderer, radius: 8, color: "#1d4ed8", weight: 4, fillColor: "#fff", fillOpacity: 1 })
+  map.getPane("stations").classList.remove("dimmed");
+  L.circleMarker([s.y, s.x], { renderer: stopRenderer, interactive: false, radius: 8, color: "#1d4ed8", weight: 4, fillColor: "#fff", fillOpacity: 1 })
     .addTo(stopLayer);
   const R = data.meta.routes;
   const list = [...stationRoutes.get(sid)].map((rid) => ({ rid, ...R[rid] })).sort(routeSort);
@@ -718,9 +728,15 @@ function showDetail(r) {
   stopLayer.clearLayers();
   const names = (r.sids || []).map((sid) => stations[sid]).filter(Boolean);
   const color = TYPE_COLORS[r.typeName] || "#666";
-  for (const s of names) {
-    L.circleMarker([s.y, s.x], { renderer: stationRenderer, radius: 6, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1 })
-      .bindTooltip(`${s.name} (${s.ars})`).addTo(stopLayer);
+  // 이 노선의 정류장이 잘 보이도록 나머지 흰 정류장 점은 흐리게 둔다
+  map.getPane("stations").classList.add("dimmed");
+  for (const sid of r.sids || []) {
+    const s = stations[sid];
+    if (!s) continue;
+    L.circleMarker([s.y, s.x], { renderer: stopRenderer, radius: 7, color: "#fff", weight: 2.5, fillColor: color, fillOpacity: 1 })
+      .bindTooltip(`${s.name} (${s.ars})`)
+      .on("click", (e) => { L.DomEvent.stopPropagation(e); showStation(sid); })
+      .addTo(stopLayer);
   }
   const where = r.by ? "선택 지역" : "이 지역";
   const estMsg = estimated.has(r.rid)
@@ -812,6 +828,7 @@ function closeDetail() {
   state.activeStation = null;
   arrowLayer.clearLayers();
   stopLayer.clearLayers();
+  map.getPane("stations").classList.remove("dimmed");
   $("#detail").hidden = true;
   $("#side").classList.remove("detail-open");
   highlight(null);
