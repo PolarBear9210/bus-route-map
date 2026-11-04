@@ -5,12 +5,14 @@
 
   list    : 노선 목록 수집 → data/raw/gyeonggi_api/<수집일>/route_list.json
   routes  : 목록 중 --region(경유 지역명)에 해당하는 노선의 경로·정류장 수집 → routes/<routeId>.json
+  info    : 목록의 모든 노선의 배차간격·첫차·막차·운수사 수집 → info/<routeId>.json
             이미 받은 노선은 건너뛰므로, 한도 초과로 멈추면 같은 명령을 다시 실행하면 이어서 받는다.
 
 사용법:
   uv run python scripts/collect_gyeonggi.py list [--date YYYYMMDD]
   uv run python scripts/collect_gyeonggi.py routes --region 성남 [--date YYYYMMDD] [--limit N]
   uv run python scripts/collect_gyeonggi.py routes --ids 228000393 232000017 [--date YYYYMMDD]
+  uv run python scripts/collect_gyeonggi.py info [--date YYYYMMDD] [--limit N]
 """
 import argparse
 import json
@@ -140,9 +142,37 @@ def collect_routes(session, key, out: Path, region: str | None, ids: list[str] |
     print(f"완료: 이번 실행 {done}개, 누적 {len(list(routes_dir.glob('*.json')))}개 → {routes_dir}")
 
 
+def collect_info(session, key, out: Path, limit: int | None) -> None:
+    """목록의 모든 노선에 대해 배차간격·첫차·막차·운수사 정보를 받는다. 이미 받은 노선은 건너뛴다."""
+    list_file = out / "route_list.json"
+    if not list_file.exists():
+        sys.exit(f"{list_file}가 없습니다. 먼저 list를 실행하세요.")
+    route_list = json.loads(list_file.read_text(encoding="utf-8"))
+    info_dir = out / "info"
+    info_dir.mkdir(parents=True, exist_ok=True)
+    todo = [r for r in route_list if not (info_dir / f"{r['routeId']}.json").exists()]
+    if limit:
+        todo = todo[:limit]
+    print(f"노선 {len(route_list)}개 중 남은 {len(todo)}개 상세 정보 수집 시작")
+    done = 0
+    try:
+        for r in todo:
+            items = call(session, key, "getBusRouteInfoItemv2", "busRouteInfoItem", routeId=r["routeId"])
+            (info_dir / f"{r['routeId']}.json").write_text(json.dumps(items[0] if items else {}, ensure_ascii=False), encoding="utf-8")
+            time.sleep(DELAY)
+            done += 1
+            if done % 50 == 0:
+                print(f"  {done}/{len(todo)}  (마지막: {r['routeName']})", flush=True)
+    except ApiStop as e:
+        print(f"중단: {e}")
+        print(f"이번 실행 {done}개 저장. 같은 명령을 다시 실행하면 이어서 받습니다.")
+        sys.exit(1)
+    print(f"완료: 이번 실행 {done}개, 누적 {len(list(info_dir.glob('*.json')))}개 → {info_dir}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["list", "routes"])
+    ap.add_argument("mode", choices=["list", "routes", "info"])
     ap.add_argument("--date", default=date.today().strftime("%Y%m%d"))
     ap.add_argument("--region", help="routes 모드: 경유 지역명(regionName) 예: 성남. '전체'면 목록의 모든 노선")
     ap.add_argument("--ids", nargs="+", help="routes 모드: 지역 대신 노선 ID를 직접 지정")
@@ -155,6 +185,8 @@ def main() -> None:
     try:
         if args.mode == "list":
             collect_list(session, key, out)
+        elif args.mode == "info":
+            collect_info(session, key, out, args.limit)
         else:
             if not (args.region or args.ids):
                 sys.exit("routes 모드에는 --region 또는 --ids가 필요합니다.")

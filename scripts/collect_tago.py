@@ -7,7 +7,7 @@ TAGO ID는 'ICB' + 한 자리 + 8자리 형식이고, 끝 8자리 앞에 '1'을 
 (노선 ICB365000161 = 165000161, 정류장 ICB364000628 = 164000628).
 
 사용법: uv run python scripts/collect_tago.py [--date YYYYMMDD]
-출력: data/raw/tago/<수집일>/incheon_routes.json, stations/<노선ID>.json
+출력: data/raw/tago/<수집일>/incheon_routes.json, stations/<노선ID>.json, info/<노선ID>.json(배차간격)
 """
 import argparse
 import json
@@ -83,6 +83,17 @@ def main() -> None:
     for n, r in enumerate(todo, 1):
         items, _ = call(session, key, "getRouteAcctoThrghSttnList", routeId=r["routeid"], numOfRows=1000)
         (out / "stations" / f"{r['localId']}.json").write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+        if n % 50 == 0:
+            print(f"  {n}/{len(todo)}", flush=True)
+        time.sleep(DELAY)
+
+    # 노선 상세(배차간격)
+    (out / "info").mkdir(exist_ok=True)
+    todo = [r for r in routes if not (out / "info" / f"{r['localId']}.json").exists()]
+    print(f"남은 노선 {len(todo)}개 상세 정보 수집")
+    for n, r in enumerate(todo, 1):
+        items, _ = call(session, key, "getRouteInfoIem", routeId=r["routeid"])
+        (out / "info" / f"{r['localId']}.json").write_text(json.dumps(items[0] if items else {}, ensure_ascii=False), encoding="utf-8")
         if n % 50 == 0:
             print(f"  {n}/{len(todo)}", flush=True)
         time.sleep(DELAY)

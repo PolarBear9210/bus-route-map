@@ -165,11 +165,17 @@ ul.routes li:hover, ul.routes li.active { background: var(--hover); }
 .back:hover { background: var(--hover); }
 .detail-head { display: flex; align-items: center; gap: 12px; }
 .detail-head h3 { margin: 2px 0 0; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
-.d-corp { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
 .st-icon { flex: none; width: 34px; height: 34px; border-radius: 50%; background: #fff; border: 5px solid var(--accent); box-shadow: 0 0 0 1px var(--line); }
 .d-ends { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--bg-soft); font-size: 13px; font-weight: 600; }
 .d-ends small { display: block; font-size: 11px; font-weight: 500; color: var(--ink-3); }
 .d-ends > div:last-child { text-align: right; }
+/* 노선 기본 정보: 배차간격·운행시간·노선 길이·운수사 */
+.d-info { margin: 12px 0 0; font-size: 13px; }
+.d-row { display: grid; grid-template-columns: 64px 1fr; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.d-row:last-child { border-bottom: 0; }
+.d-row dt { color: var(--ink-3); font-size: 12px; padding-top: 1px; }
+.d-row dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.d-day { color: var(--ink-2); font-size: 12px; }
 .d-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .d-note { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; background: #fff7ed; color: #9a3412; font-size: 12px; line-height: 1.5; }
 ul.per-region { list-style: none; margin: 0; padding: 0; }

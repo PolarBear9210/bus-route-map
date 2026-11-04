@@ -191,6 +191,12 @@ def gg_city(admin_name: str) -> str:
     return m.group(1) if m else "경기"
 
 
+def clean_corp(v) -> str:
+    """서울 API 운수사 값. 경기·인천 노선은 운수사 대신 지역 이름만 오므로 뺀다"""
+    corp = " ".join(str(v or "").split())
+    return "" if corp in ("경기", "인천") else corp
+
+
 def seoul_records(day: str):
     """서울 API 노선 파일 → (노선 정보, 정류장 목록, 경로 좌표, 정류장 순서 좌표)"""
     for f in sorted((ROOT / "data" / "raw" / "seoul_api" / day / "routes").glob("*.json")):
@@ -201,7 +207,7 @@ def seoul_records(day: str):
         route = {
             "rid": r["busRouteId"], "name": r["busRouteNm"], "type": r["routeType"],
             "typeName": ROUTE_TYPES.get(r["routeType"], r["routeType"]), "city": "인천" if r["routeType"] == "7" else "서울",
-            "start": r["stStationNm"], "end": r["edStationNm"], "corp": r.get("corpNm", ""),
+            "start": r["stStationNm"], "end": r["edStationNm"], "corp": clean_corp(r.get("corpNm")),
         }
         stations = [{"sid": s["station"], "ars": s["arsId"], "name": s["stationNm"], "seq": int(s["seq"]),
                      "x": float(s["gpsX"] or 0), "y": float(s["gpsY"] or 0)} for s in rec["stations"]]
@@ -355,6 +361,64 @@ def classify(regions: gpd.GeoDataFrame, key: str, stops: gpd.GeoDataFrame, lines
     return result
 
 
+def hhmm(v) -> str | None:
+    """API마다 다른 시각 표기('20261102043000', '06:00', '0500', 2300, 0)를 'HH:MM'으로 맞춘다. 값이 없으면 None"""
+    s = str(v or "").replace(":", "").strip()
+    if not s.isdigit() or s == "0":
+        return None
+    s = s[8:12] if len(s) == 14 else s.zfill(4)
+    return f"{s[:2]}:{s[2:4]}" if len(s) == 4 else None
+
+
+def mins(*vals) -> list[int]:
+    """배차간격 값들 중 0·빈 값을 뺀 분 단위 목록"""
+    out = []
+    for v in vals:
+        try:
+            if int(v) > 0:
+                out.append(int(v))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def build_route_info(rids: set, day: str, gg_day: str | None, ic_day: str | None) -> dict:
+    """노선 상세에 보여줄 기본 정보. 서울 API 값 위에 경기·TAGO 상세 값을 덮어쓴다(값이 있는 항목만).
+    hw: 배차간격 분 {wd: 평일, sat: 토, sun: 일} (경기는 [최소, 최대]. peekAlloc·nPeekAlloc은 이름과 달리 첨두/비첨두가 아니라 최소/최대 배차시간), first/last: 기점 출발 첫차·막차,
+    first2/last2: 종점 출발 첫차·막차, km: 노선 길이, corp: 운수사"""
+    infos = {}
+
+    def merge(rid, **fields):
+        if rid not in rids:
+            return
+        cur = infos.setdefault(rid, {})
+        hw = {k: v for k, v in (fields.pop("hw", None) or {}).items() if v}
+        if hw:
+            cur["hw"] = {**cur.get("hw", {}), **hw}
+        cur.update({k: v for k, v in fields.items() if v})
+
+    for r in json.loads((ROOT / "data" / "raw" / "seoul_api" / day / "route_list.json").read_text(encoding="utf-8")):
+        km = str(r.get("length") or "").strip()
+        merge(r["busRouteId"], hw={"wd": mins(r.get("term"))}, first=hhmm(r.get("firstBusTm")), last=hhmm(r.get("lastBusTm")),
+              km=km if km not in ("", "0") else None, corp=clean_corp(r.get("corpNm")))
+
+    if ic_day:
+        for f in (ROOT / "data" / "raw" / "tago" / ic_day / "info").glob("*.json"):
+            r = json.loads(f.read_text(encoding="utf-8"))
+            merge(f.stem, hw={"wd": mins(r.get("intervaltime")), "sat": mins(r.get("intervalsattime")), "sun": mins(r.get("intervalsuntime"))},
+                  first=hhmm(r.get("startvehicletime")), last=hhmm(r.get("endvehicletime")))
+
+    if gg_day:
+        for f in (ROOT / "data" / "raw" / "gyeonggi_api" / gg_day / "info").glob("*.json"):
+            r = json.loads(f.read_text(encoding="utf-8"))
+            merge(f.stem, hw={"wd": mins(r.get("peekAlloc"), r.get("nPeekAlloc")), "sat": mins(r.get("satPeekAlloc"), r.get("satNPeekAlloc")),
+                              "sun": mins(r.get("sunPeekAlloc"), r.get("sunNPeekAlloc"))},
+                  first=hhmm(r.get("upFirstTime")), last=hhmm(r.get("upLastTime")),
+                  first2=hhmm(r.get("downFirstTime")), last2=hhmm(r.get("downLastTime")),
+                  corp=" ".join(filter(None, [str(r.get("companyName") or ""), str(r.get("companyTel") or "")])))
+    return infos
+
+
 def build_si(gu: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """시 단위 경계: 서울은 서울특별시 하나, 경기는 시·군(수원시처럼 구가 있는 시는 구를 합친다).
     코드는 구가 하나면 그 시군구 코드, 여럿이면 앞 네 자리+0(수원시 41111·41113… → 41110), 서울은 11000.
@@ -421,13 +485,17 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         }
         (BUNDLES / f"{code}.json").write_text(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
-    # 노선 상세용 전체 정류장(가상 지점 제외): {노선 ID: [[정류장 id, 이름, 번호, x, y], ...]} — 운행 순서
+    # 노선 상세 파일: {노선 ID: {"s": 전체 정류장(가상 지점 제외) [[id, 이름, 번호, x, y], ...] 운행 순서, "i": 기본 정보}}
     ROUTE_STOPS.mkdir(parents=True, exist_ok=True)
     for old in ROUTE_STOPS.glob("*.json"):
         old.unlink()
     shards = {}
     for rid, g in stops.sort_values("seq").groupby("rid"):
-        shards.setdefault(rid[-2:], {})[rid] = [[r.sid, r.name, str(r.ars).strip(), round(r.x, 5), round(r.y, 5)] for r in g.itertuples()]
+        shards.setdefault(rid[-2:], {}).setdefault(rid, {})["s"] = [[r.sid, r.name, str(r.ars).strip(), round(r.x, 5), round(r.y, 5)] for r in g.itertuples()]
+    route_info = build_route_info(set(routes.index), day, gg_day, ic_day)
+    for rid, info in route_info.items():
+        shards.setdefault(rid[-2:], {}).setdefault(rid, {})["i"] = info
+    print(f"기본 정보: 배차간격 있음 {sum('hw' in i for i in route_info.values())}개, 운행시간 있음 {sum('first' in i for i in route_info.values())}개 / 노선 {len(routes)}개")
     for key, shard in shards.items():
         (ROUTE_STOPS / f"{key}.json").write_text(json.dumps(shard, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 

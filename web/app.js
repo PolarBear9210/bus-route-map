@@ -736,9 +736,10 @@ function showDetail(r) {
   const d = openDetailView(`
     <div class="detail-head">
       <span class="badge big" style="background:${color}">${r.name}</span>
-      <div><div class="kicker">${[r.typeName, r.city && r.city !== "서울" ? r.city : ""].filter(Boolean).join(" · ")}</div>${r.corp ? `<div class="d-corp">${r.corp}</div>` : ""}</div>
+      <div class="kicker">${[r.typeName, r.city && r.city !== "서울" ? r.city : ""].filter(Boolean).join(" · ")}</div>
     </div>
     <div class="d-ends"><div><small>기점</small>${r.start}</div><span class="ri-arrow">→</span><div><small>종점</small>${r.end}</div></div>
+    <dl class="d-info" id="route-info"></dl>
     <div class="d-actions">
       ${routeGeo[r.rid] ? '<button class="btn fit">노선 전체 보기</button><span class="route-sub">▶ 화살표: 운행 방향</span>' : '<span class="route-sub">경로 좌표가 없는 노선입니다.</span>'}
     </div>
@@ -751,21 +752,57 @@ function showDetail(r) {
     <div id="route-stops"></div>`);
   const fit = d.querySelector(".fit");
   if (fit) fit.onclick = () => fitTo(L.latLngBounds(routeGeo[r.rid].flat()));
-  // 지역 안 정류장을 먼저 보여주고, 노선 전체 정류장을 읽어 오면 바꿔 그린다. 못 읽으면 지역 안 정류장만 남는다
+  // 지역 안 정류장을 먼저 보여주고, 노선 상세 파일을 읽어 오면 전체 정류장과 기본 정보로 바꿔 그린다.
+  // 못 읽으면 지역 안 정류장과 운수사만 남는다
   renderRouteStops(r, inRegion, false);
-  loadRouteStops(r.rid).then((all) => { if (state.activeRid === r.rid && all.length) renderRouteStops(r, all, true); }).catch(() => {});
+  renderRouteInfo({ corp: r.corp });
+  loadRouteDetail(r.rid).then(({ stops, info }) => {
+    if (state.activeRid !== r.rid) return;
+    if (stops.length) renderRouteStops(r, stops, true);
+    renderRouteInfo({ corp: r.corp, ...info });
+  }).catch(() => {});
 }
 
-// 노선별 전체 정류장은 노선 ID 끝 두 자리로 나눈 파일에 있다
+// 노선별 전체 정류장과 기본 정보는 노선 ID 끝 두 자리로 나눈 파일에 있다
 const routeStopShards = new Map();
-function loadRouteStops(rid) {
+function loadRouteDetail(rid) {
   const key = rid.slice(-2);
   if (!routeStopShards.has(key)) {
     routeStopShards.set(key, fetch(`data/route_stops/${key}.json`, { cache: "no-cache" })
       .then((res) => { if (!res.ok) throw new Error(res.status); return res.json(); })
       .catch((err) => { routeStopShards.delete(key); throw err; }));
   }
-  return routeStopShards.get(key).then((shard) => (shard[rid] || []).map(([sid, name, ars, x, y]) => ({ sid, name, ars, x, y })));
+  return routeStopShards.get(key).then((shard) => ({
+    stops: (shard[rid]?.s || []).map(([sid, name, ars, x, y]) => ({ sid, name, ars, x, y })),
+    info: shard[rid]?.i || {},
+  }));
+}
+
+// 배차간격 표기. 값이 둘이면 최소~최대 (API 값의 앞뒤가 뒤바뀐 노선이 드물게 있어 작은 값부터)
+function fmtHeadway(vals) {
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  return lo === hi ? `${lo}분` : `${lo}~${hi}분`;
+}
+
+// 노선 기본 정보(배차간격·운행시간·노선 길이·운수사). 값이 없는 항목은 뺀다
+function renderRouteInfo(info) {
+  const box = $("#route-info");
+  if (!box) return;
+  const rows = [];
+  const hw = info.hw || {};
+  const days = [["평일", hw.wd], ["토요일", hw.sat], ["일요일", hw.sun]].filter(([, v]) => v?.length);
+  if (days.length) {
+    // 평일 값 하나뿐이면(서울 API·TAGO) 요일을 붙이지 않는다
+    const only = days.length === 1 && days[0][0] === "평일";
+    rows.push(["배차간격", days.map(([d, v]) => `<div>${only ? "" : `<span class="d-day">${d}</span> `}${fmtHeadway(v)}</div>`).join("")]);
+  }
+  const span = (a, b) => (a || b ? `${a || "?"} ~ ${b || "?"}` : "");
+  const up = span(info.first, info.last), down = span(info.first2, info.last2);
+  if (up || down) rows.push(["운행시간", down ? `${up ? `<div><span class="d-day">기점 출발</span> ${up}</div>` : ""}<div><span class="d-day">종점 출발</span> ${down}</div>` : up]);
+  if (info.km) rows.push(["노선 길이", `${info.km}km`]);
+  if (info.corp) rows.push(["운수사", info.corp]);
+  box.hidden = !rows.length;
+  box.innerHTML = rows.map(([k, v]) => `<div class="d-row"><dt>${k}</dt><dd>${v}</dd></div>`).join("");
 }
 
 // 노선 정류장을 지도와 목록에 그린다. 선택 지역 안은 노선 색으로 강조하고, 다른 지역은 회색으로 위치만 보여준다
