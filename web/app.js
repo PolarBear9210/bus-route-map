@@ -102,7 +102,11 @@ function ensureBundles(guCodes) {
 }
 
 // 지역이 걸친 시군구 묶음 파일들: 시는 속한 구 전부, 구는 자신, 행정동은 속한 구
-const bundlesOf = (level, code) => (level === "si" ? regionIndex[`si:${code}`].sggs : level === "gu" ? [code] : [regionIndex[`dong:${code}`].sgg]);
+// 구가 여러 개인 시는 중복 없는 시 단위 묶음(si_<코드>)을 읽는다
+const bundlesOf = (level, code) => {
+  if (level === "si") return regionIndex[`si:${code}`].sggs.length > 1 ? [`si_${code}`] : [code];
+  return level === "gu" ? [code] : [regionIndex[`dong:${code}`].sgg];
+};
 const LEVEL_NAMES = { si: "시", gu: "구", dong: "행정동" };
 
 function fmtDate(s) { return `${s.slice(0, 4)}.${s.slice(4, 6)}.${s.slice(6, 8)}`; }
@@ -649,8 +653,9 @@ function routeShape(r) {
   const parts = routeGeo[r.rid], est = estParts[r.rid];
   const real = parts.filter((_, i) => !est?.has(i)), guess = parts.filter((_, i) => est?.has(i));
   const group = L.featureGroup();
-  if (real.length) L.polyline(real, baseStyle(r)).addTo(group);
-  if (guess.length) L.polyline(guess, { ...EST_STYLE, isEst: true }).addTo(group);
+  // smoothFactor: 화면 축척에 맞춰 점 수를 줄여 그린다(확대·이동 때 다시 그리는 부담을 줄임)
+  if (real.length) L.polyline(real, { ...baseStyle(r), smoothFactor: 2 }).addTo(group);
+  if (guess.length) L.polyline(guess, { ...EST_STYLE, isEst: true, smoothFactor: 2 }).addTo(group);
   return group;
 }
 
@@ -837,13 +842,28 @@ function stationRadius() {
   const z = map.getZoom();
   return z <= 11 ? 1.5 : z === 12 ? 2 : z === 13 ? 3 : z === 14 ? 4 : 5;
 }
-map.on("zoomend", drawStations);
+// 정류장 점은 지역을 고를 때 한 번만 만들고, 확대·축소 때는 크기만 바꾼다(이동할 때마다 다시 만들면 1초 넘게 걸림).
+// 시 단위처럼 정류장이 수천 개면 축소된 상태에서는 점 묶음을 숨기고 "확대하면 보인다"고 알린다
+// 서울의 구와 대부분의 구는 바로 보이고, 정류장이 1,000개 넘는 시(구가 여럿인 시 전체, 파주·남양주 등 넓은 시·군)는 확대해야 보인다
+const STATION_MIN_ZOOM = 13, STATION_MAX_LOW_ZOOM = 1000;
+map.on("zoomend", updateStationZoom);
+
+function updateStationZoom() {
+  const hint = $("#station-hint");
+  const tooMany = state.showStations && map.getZoom() < STATION_MIN_ZOOM && stationLayer.getLayers().length > STATION_MAX_LOW_ZOOM;
+  if (hint) hint.hidden = !tooMany;
+  if (tooMany || !state.showStations) { stationLayer.remove(); return; }
+  const radius = stationRadius(), weight = map.getZoom() >= 14 ? 1.5 : 1;
+  stationLayer.eachLayer((m) => { m.setRadius(radius); m.setStyle({ weight }); });
+  if (!map.hasLayer(stationLayer)) stationLayer.addTo(map);
+}
 
 // 선택 지역 안에서 (필터에 보이는) 정차 노선이 서는 정류장
 function drawStations() {
+  // 지도에서 떼어 놓고 만들어야 숨길 때(정류장이 너무 많을 때) 그림 요소를 만드는 비용이 들지 않는다
+  stationLayer.remove();
   stationLayer.clearLayers();
-  if (!state.showStations) return;
-  for (const [sid, names] of regionStations) {
+  if (state.showStations) for (const [sid, names] of regionStations) {
     const s = stations[sid];
     if (!s) continue;
     L.circleMarker([s.y, s.x], { renderer: stationRenderer, radius: stationRadius(), color: "#475569", weight: map.getZoom() >= 14 ? 1.5 : 1, fillColor: "#fff", fillOpacity: 1 })
@@ -851,6 +871,7 @@ function drawStations() {
       .on("click", (e) => { L.DomEvent.stopPropagation(e); showStation(sid); })
       .addTo(stationLayer);
   }
+  updateStationZoom();
 }
 
 // 상세 보기 중인 노선을 따라 일정 간격(화면 픽셀 기준)으로 방향 화살표를 놓는다. 화면 밖은 그리지 않는다

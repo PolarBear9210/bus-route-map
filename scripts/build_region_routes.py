@@ -484,6 +484,18 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
             "stations": {sid: stations[sid] for sid in sids if sid in stations},
         }
         (BUNDLES / f"{code}.json").write_text(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    # 구가 여러 개인 시(수원·성남·용인 등)는 시 단위 묶음을 따로 둔다. 구 묶음을 여럿 받으면 같은 노선 경로가 중복으로 온다
+    # 서울특별시 전체는 웹에서 고를 수 없으므로(노선이 너무 많아 화면이 멈춤) 만들지 않는다
+    for _, row in si[si["sggs"].str.contains(",") & (si["code"] != "11000")].iterrows():
+        entry = by_si[row["code"]]
+        rids = [rid for rid in [*entry["stop"], *entry["pass"]] if rid in geoms]
+        sids = {sid for sids in entry["stop"].values() for sid in sids}
+        bundle = {
+            "routes": {rid: geoms[rid][0] for rid in rids},
+            "estParts": {rid: geoms[rid][1] for rid in rids if geoms[rid][1]},
+            "stations": {sid: stations[sid] for sid in sids if sid in stations},
+        }
+        (BUNDLES / f"si_{row['code']}.json").write_text(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
     # 노선 상세 파일: {노선 ID: {"s": 전체 정류장(가상 지점 제외) [[id, 이름, 번호, x, y], ...] 운행 순서, "i": 기본 정보}}
     ROUTE_STOPS.mkdir(parents=True, exist_ok=True)

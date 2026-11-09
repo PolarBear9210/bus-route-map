@@ -80,6 +80,8 @@ h1 { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight:
 .kind:has(input:focus-visible) { outline: 2px solid var(--accent-2); outline-offset: 1px; }
 .kind:not(:has(input:checked)) .line, .kind:not(:has(input:checked)) .dot { opacity: 0.35; }
 
+.station-hint { margin: -6px 0 10px; font-size: 12px; color: var(--ink-3); }
+
 /* 노선 유형: 묶음별 칩 */
 .tf-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .tf-label { font-size: 13px; color: var(--ink-2); }
