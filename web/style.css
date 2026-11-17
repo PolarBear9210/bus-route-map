@@ -102,6 +102,7 @@ h1 { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight:
 .line { display: inline-block; width: 22px; height: 0; vertical-align: middle; margin-right: 4px; border-top: 3px solid #475569; }
 .line.dashed { border-top-style: dashed; }
 .line.est { border-top: 2px dotted #8a96a0; }
+.line.road { border-top: 2px dotted #2f6fb3; opacity: .7; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid #475569; background: #fff; vertical-align: -1px; margin-right: 3px; }
 .tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
 .tools select, .tools button { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line-2); border-radius: 7px; background: #fff; cursor: pointer; }

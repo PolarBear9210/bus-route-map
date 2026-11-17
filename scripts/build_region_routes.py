@@ -143,46 +143,60 @@ def reassemble(pieces: list[list[tuple]], tol: float = SNAP_M) -> list[list[tupl
     return pieces
 
 
+def load_osrm_legs() -> dict:
+    """route_osrm.py가 받아 둔 정류장 사이 도로 경로 {"정류장id|정류장id": [[x, y], ...] 또는 None}"""
+    f = ROOT / "data" / "raw" / "osrm" / "legs.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+OSRM_LEGS = load_osrm_legs()
+ROAD_FOR_PASS = False  # 도로 기반 추정 구간을 통과 판정에도 쓸지 (승용차 도로망 기준이라 우선 쓰지 않음)
+
+
 def stitch(parts: list, stations: list[dict]):
-    """정류장 순서(가상 지점 포함)를 뼈대로 경로를 다시 잇는다.
-    이어진 두 정류장이 같은 경로 조각 위에 있으면 그 사이의 실제 경로 구간을, 아니면 직선을 쓴다.
-    반환: (지도용 구간 목록 [(LineString, 실제 경로 여부)], 판정용 실제 구간 MultiLineString 또는 None,
-          실제 구간 길이 비율 0~1). 모두 경위도. 지도용 구간은 실제/추정이 바뀌는 곳마다 나뉜다."""
+    """정류장 순서(가상 지점 포함)를 뼈대로 경로를 다시 잇는다. 이어진 두 정류장 사이는
+    같은 경로 조각 위에 있으면 그 사이의 실제 경로 구간("real"), 아니면 OSRM 도로 경로("road"), 그것도 없으면 직선("straight").
+    반환: (지도용 구간 목록 [(LineString, 종류)], 판정용 구간 MultiLineString 또는 None, {종류: 길이 비율 0~1}).
+          모두 경위도. 지도용 구간은 종류가 바뀌는 곳마다 나뉜다."""
     metric_parts = [list(to_metric(LineString(p)).coords) for p in parts]
     pieces = [LineString(p) for p in reassemble(metric_parts) if len(p) >= 2]
-    pts = [Point(*WGS_TO_M.transform(s["x"], s["y"])) for s in sorted(stations, key=lambda s: s["seq"]) if in_korea(s["x"], s["y"])]
+    seq = [s for s in sorted(stations, key=lambda s: s["seq"]) if in_korea(s["x"], s["y"])]
+    pts = [Point(*WGS_TO_M.transform(s["x"], s["y"])) for s in seq]
     if len(pts) < 2:
-        return None, None, 0.0
+        return None, None, {}
     snaps = []
     for p in pts:
         d, i = min(((ln.distance(p), i) for i, ln in enumerate(pieces)), default=(math.inf, -1))
         snaps.append((i, pieces[i].project(p)) if d <= SNAP_M else None)
 
-    runs, real, real_len, total_len = [], [], 0.0, 0.0  # runs: [실제 여부, 좌표 목록]
+    runs, judged, lengths = [], [], {"real": 0.0, "road": 0.0, "straight": 0.0}  # runs: [종류, 좌표 목록]
     for k in range(1, len(pts)):
         a, b, pa, pb = snaps[k - 1], snaps[k], pts[k - 1], pts[k]
-        seg = None
+        seg, kind = None, "straight"
         # 같은 조각 위의 두 정류장이고, 조각을 따라간 거리가 직선거리에 비해 터무니없이 길지 않으면 실제 경로 구간을 쓴다
         if a and b and a[0] == b[0] and abs(b[1] - a[1]) <= 3 * pa.distance(pb) + 1000:
             seg = shapely.ops.substring(pieces[a[0]], a[1], b[1])  # a > b 이면 거꾸로 된 구간이 나온다
-        is_real = seg is not None and seg.geom_type == "LineString" and seg.length > 0
-        c = list(seg.coords) if is_real else [(pa.x, pa.y), (pb.x, pb.y)]
+            if seg.geom_type == "LineString" and seg.length > 0:
+                kind = "real"
+        if kind == "straight" and OSRM_LEGS.get(f"{seq[k - 1]['sid']}|{seq[k]['sid']}"):
+            seg, kind = to_metric(LineString(OSRM_LEGS[f"{seq[k - 1]['sid']}|{seq[k]['sid']}"])), "road"
+        c = list(seg.coords) if kind != "straight" else [(pa.x, pa.y), (pb.x, pb.y)]
         if c[0] == c[-1]:
             continue
-        if is_real:
-            real.append(seg)
-            real_len += seg.length
-        total_len += LineString(c).length
-        if runs and runs[-1][0] == is_real:
+        if kind == "real" or (kind == "road" and ROAD_FOR_PASS):
+            judged.append(seg)
+        lengths[kind] += LineString(c).length
+        if runs and runs[-1][0] == kind:
             runs[-1][1].extend(xy for xy in c if xy != runs[-1][1][-1])
         else:
             # 구간이 바뀌어도 선이 끊기지 않도록 앞 구간의 끝점에서 시작한다
-            runs.append([is_real, ([runs[-1][1][-1]] if runs else []) + c])
+            runs.append([kind, ([runs[-1][1][-1]] if runs else []) + c])
     if not runs:
-        return None, None, 0.0
-    drawn = [(to_wgs(LineString(c)), r) for r, c in runs if len(c) >= 2]
-    real_geom = to_wgs(MultiLineString([list(s.coords) for s in real])) if real else None
-    return drawn, real_geom, (real_len / total_len if total_len else 0.0)
+        return None, None, {}
+    drawn = [(to_wgs(LineString(c)), kind) for kind, c in runs if len(c) >= 2]
+    judged_geom = to_wgs(MultiLineString([list(s.coords) for s in judged])) if judged else None
+    total = sum(lengths.values())
+    return drawn, judged_geom, {k: (v / total if total else 0.0) for k, v in lengths.items()}
 
 
 def gg_city(admin_name: str) -> str:
@@ -316,22 +330,24 @@ def load_routes(day: str, gg_day: str | None, ic_day: str | None = None):
         if parts and far_stop_ratio(parts, stations) < MAX_FAR_RATIO:
             # 실제 정류장과 잘 맞는 경로는 그대로 쓴다 (다 이어지지 못한 조각은 여러 조각인 채로)
             real = LineString(parts[0]) if len(parts) == 1 else MultiLineString(parts)
-            draw.append({"rid": rid, "geometry": real, "estParts": [], "realPct": 100})
+            draw.append({"rid": rid, "geometry": real, "estParts": [], "roadParts": [], "realPct": 100, "roadPct": 0})
         else:
             # 경로가 없거나, 정류장과 맞지 않는(구간이 빠진) 노선:
             # 정류장 순서를 뼈대로 실제 경로 구간을 이어 붙이고 빈 곳만 직선(추정 구간)으로 채운다
             segs, real, ratio = stitch(parts, stations)
             if segs:
                 draw.append({"rid": rid, "geometry": MultiLineString([g for g, _ in segs]),
-                             "estParts": [i for i, (_, is_real) in enumerate(segs) if not is_real], "realPct": round(ratio * 100)})
-            if parts:
-                stitched.append((route["name"], round(ratio * 100)))
+                             "estParts": [i for i, (_, k) in enumerate(segs) if k == "straight"],
+                             "roadParts": [i for i, (_, k) in enumerate(segs) if k == "road"],
+                             "realPct": round(ratio.get("real", 0) * 100), "roadPct": round(ratio.get("road", 0) * 100)})
+            if parts or ratio.get("road"):
+                stitched.append((route["name"], round(ratio.get("real", 0) * 100), round(ratio.get("road", 0) * 100)))
         if real is not None:
             lines.append({"rid": rid, "geometry": real})
         routes.append({**route, "typeName": refine_type(route), "hasPath": real is not None})
 
-    print(f"정류장 순서로 경로를 다시 이은 노선 {len(stitched)}개 (실제 경로 비율): "
-          f"{', '.join(f'{n} {p}%' for n, p in stitched[:15])}{' …' if len(stitched) > 15 else ''}")
+    print(f"정류장 순서로 경로를 다시 이은 노선 {len(stitched)}개 (실제 경로/도로 기반 추정 비율): "
+          f"{', '.join(f'{n} {p}/{r}%' for n, p, r in stitched[:15])}{' …' if len(stitched) > 15 else ''}")
     routes = pd.DataFrame(routes).set_index("rid")
     stops = gpd.GeoDataFrame(stops, geometry=gpd.points_from_xy([s["x"] for s in stops], [s["y"] for s in stops]), crs="EPSG:4326")
     lines = gpd.GeoDataFrame(lines, crs="EPSG:4326")
@@ -420,14 +436,16 @@ def build_route_info(rids: set, day: str, gg_day: str | None, ic_day: str | None
 
 
 def build_si(gu: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """시 단위 경계: 서울은 서울특별시 하나, 경기는 시·군(수원시처럼 구가 있는 시는 구를 합친다).
-    코드는 구가 하나면 그 시군구 코드, 여럿이면 앞 네 자리+0(수원시 41111·41113… → 41110), 서울은 11000.
+    """시 단위 경계: 서울·인천은 광역시 하나(서울특별시·인천광역시), 경기는 시·군(수원시처럼 구가 있는 시는 구를 합친다).
+    코드는 구가 하나면 그 시군구 코드, 여럿이면 앞 네 자리+0(수원시 41111·41113… → 41110), 서울 11000, 인천 28000.
     sggs: 속한 시군구 코드 목록 — 웹이 시를 고르면 이 구들의 묶음 파일을 읽는다."""
-    gu = gu.assign(city=np.where(gu["sido"] == "서울", "서울특별시", gu["sggnm"].str.split().str[0]))
+    metro = {"서울": ("서울특별시", "11000"), "인천": ("인천광역시", "28000")}
+    gu = gu.assign(city=[metro[s][0] if s in metro else n.split()[0] for s, n in zip(gu["sido"], gu["sggnm"])])
     groups = gu.groupby("city")["sgg"].apply(sorted)
     si = gu.dissolve(by="city", as_index=False)[["city", "sido", "geometry"]]
     si["geometry"] = si.geometry.make_valid().buffer(0)
-    si["code"] = si["city"].map(lambda c: "11000" if c == "서울특별시" else groups[c][0] if len(groups[c]) == 1 else groups[c][0][:4] + "0")
+    metro_code = dict(metro.values())
+    si["code"] = si["city"].map(lambda c: metro_code.get(c) or (groups[c][0] if len(groups[c]) == 1 else groups[c][0][:4] + "0"))
     si["sggs"] = si["city"].map(lambda c: ",".join(groups[c]))
     multi = si[si["sggs"].str.contains(",")]
     assert si["code"].is_unique and not set(multi["code"]) & set(gu["sgg"]), "시 코드가 겹칩니다"
@@ -442,7 +460,7 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
     dong["name"] = dong["adm_nm"].str.split().str[-1]
     gu = gpd.read_file(ROOT / "data" / "boundary" / f"gu_{bver}.geojson")[["sgg", "sggnm", "geometry"]]
     for gdf in (dong, gu):
-        gdf["sido"] = gdf["sgg"].str[:2].map({"11": "서울", "41": "경기"})
+        gdf["sido"] = gdf["sgg"].str[:2].map({"11": "서울", "28": "인천", "41": "경기"})
     si = build_si(gu)
 
     routes, stops, lines, draw = load_routes(day, gg_day, ic_day)
@@ -455,11 +473,13 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
     # 지도용 노선 경로: 단순화하고 좌표를 소수 5자리(약 1m)로 줄인다
     simp = draw.to_crs(METRIC).simplify(SIMPLIFY_M).to_crs("EPSG:4326")
     geoms, features = {}, []
-    for rid, geom, est_parts, pct in zip(draw["rid"], simp, draw["estParts"], draw["realPct"]):
-        # 웹에는 조각 목록([[x,y]...] 의 목록)으로 넘긴다. est_parts는 그중 정류장을 직선으로 이은 추정 조각 번호
+    for rid, geom, est_parts, road_parts, pct, road_pct in zip(draw["rid"], simp, draw["estParts"], draw["roadParts"], draw["realPct"], draw["roadPct"]):
+        # 웹에는 조각 목록([[x,y]...] 의 목록)으로 넘긴다. est_parts는 그중 정류장을 직선으로 이은 추정 조각 번호,
+        # road_parts는 정류장 사이를 도로망(OSRM)을 따라 이은 추정 조각 번호
         parts = [[[round(x, 5), round(y, 5)] for x, y in g.coords] for g in getattr(geom, "geoms", [geom])]
-        geoms[rid] = (parts, list(est_parts))
-        props = {"rid": rid, **{k: v for k, v in routes.loc[rid].items() if k != "hasPath"}, "realPct": int(pct), "estParts": list(est_parts)}
+        geoms[rid] = (parts, list(est_parts), list(road_parts))
+        props = {"rid": rid, **{k: v for k, v in routes.loc[rid].items() if k != "hasPath"}, "realPct": int(pct), "roadPct": int(road_pct),
+                 "estParts": list(est_parts), "roadParts": list(road_parts)}
         gj = {"type": "LineString", "coordinates": parts[0]} if len(parts) == 1 else {"type": "MultiLineString", "coordinates": parts}
         features.append({"type": "Feature", "properties": props, "geometry": gj})
     st = stops.drop_duplicates("sid").set_index("sid")
@@ -481,6 +501,7 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         bundle = {
             "routes": {rid: geoms[rid][0] for rid in rids},
             "estParts": {rid: geoms[rid][1] for rid in rids if geoms[rid][1]},
+            "roadParts": {rid: geoms[rid][2] for rid in rids if geoms[rid][2]},
             "stations": {sid: stations[sid] for sid in sids if sid in stations},
         }
         (BUNDLES / f"{code}.json").write_text(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -493,6 +514,7 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         bundle = {
             "routes": {rid: geoms[rid][0] for rid in rids},
             "estParts": {rid: geoms[rid][1] for rid in rids if geoms[rid][1]},
+            "roadParts": {rid: geoms[rid][2] for rid in rids if geoms[rid][2]},
             "stations": {sid: stations[sid] for sid in sids if sid in stations},
         }
         (BUNDLES / f"si_{row['code']}.json").write_text(json.dumps(bundle, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -524,6 +546,8 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         "minPassMeters": MIN_PASS_M, "routeCount": len(routes), "routesWithoutPath": routes.index[~routes["hasPath"]].tolist(),
         # 실제 경로 구간 비율(%)이 100 미만인 노선 — 0이면 경로 전체가 정류장을 이은 추정, 그 사이면 일부 추정
         "realPct": {r["rid"]: int(r["realPct"]) for _, r in draw.iterrows() if r["realPct"] < 100},
+        # 추정 구간 중 도로망(OSRM)을 따라 이은 구간의 비율(%) — 나머지 추정 구간은 직선
+        "roadPct": {r["rid"]: int(r["roadPct"]) for _, r in draw.iterrows() if r["roadPct"] > 0},
         "routes": routes.drop(columns="hasPath").to_dict(orient="index"),
     }
     (OUT / "region_routes.json").write_text(json.dumps({"meta": meta, "si": by_si, "gu": by_gu, "dong": by_dong}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

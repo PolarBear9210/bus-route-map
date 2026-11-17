@@ -58,8 +58,9 @@ map.getPane("arrows").style.pointerEvents = "none";
 const arrowLayer = L.layerGroup().addTo(map);
 const ARROW_GAP_PX = 70;
 const ARROW_OFFSET_PX = 5; // 진행 방향 오른쪽으로 비켜 그려 같은 길을 오가는 노선의 화살표가 겹치지 않게 한다
-const estimated = new Set(); // 실제 경로 없이 정류장을 이어 만든 추정 경로뿐인 노선
+const estimated = new Set(); // 실제 경로도 도로 기반 추정도 없이 정류장을 직선으로 이은 경로뿐인 노선
 const estParts = {}; // rid → 추정 조각 번호 Set (API 경로가 부정확해 정류장을 직선으로 이은 구간)
+const roadParts = {}; // rid → 도로 기반 추정 조각 번호 Set (정류장 사이를 도로망을 따라 이은 구간)
 let regionStations = new Map(); // 선택 지역 안 정류장 sid → 정차 노선 이름들
 let drawn = {}; // rid → polyline
 
@@ -71,7 +72,7 @@ async function load() {
   const get = (f) => fetch(`data/${f}`, { cache: "no-cache" }).then((r) => r.json());
   const [rr, si, gu, dong] = await Promise.all([get("region_routes.json"), get("regions_si.geojson"), get("regions_gu.geojson"), get("regions_dong.geojson")]);
   data = rr;
-  for (const [rid, pct] of Object.entries(rr.meta.realPct || {})) if (pct === 0) estimated.add(rid);
+  for (const [rid, pct] of Object.entries(rr.meta.realPct || {})) if (pct === 0 && !rr.meta.roadPct?.[rid]) estimated.add(rid);
   for (const e of Object.values(rr.dong)) for (const [rid, sids] of Object.entries(e.stop)) for (const sid of sids) {
     if (!stationRoutes.has(sid)) stationRoutes.set(sid, new Set());
     stationRoutes.get(sid).add(rid);
@@ -94,6 +95,7 @@ function ensureBundles(guCodes) {
         // 경로는 조각 목록: [[[x,y]...], ...]. 순서가 뒤섞인 원본 경로를 끊은 노선만 조각이 여러 개다
         for (const [rid, parts] of Object.entries(b.routes)) routeGeo[rid] ??= parts.map((part) => part.map(([x, y]) => [y, x]));
         for (const [rid, idx] of Object.entries(b.estParts)) estParts[rid] ??= new Set(idx);
+        for (const [rid, idx] of Object.entries(b.roadParts || {})) roadParts[rid] ??= new Set(idx);
         Object.assign(stations, b.stations);
       }).catch((err) => { bundles.delete(code); throw err; }));
     }
@@ -258,7 +260,8 @@ function setLevel(level) {
 
 // 지역 고르기: 시도 → 시·군·구 → (시 전체 | 구 전체 | 행정동) 을 고르고 [확인]을 누르면 지도에서 클릭한 것과 같이 선택된다.
 // "수원시 장안구"처럼 구가 있는 시는 시로 묶고, 세 번째 상자에서 "수원시 전체", 구별 "○○구 전체"와 동들을 보여준다.
-// 고른 항목에 맞춰 시/구/행정동 단위가 바뀐다. 세 번째 상자를 비우고 확인하면 두 번째 상자의 시(서울은 구), 둘 다 비우면 서울특별시 전체.
+// 고른 항목에 맞춰 시/구/행정동 단위가 바뀐다. 세 번째 상자를 비우고 확인하면 두 번째 상자의 시(서울·인천은 구·군),
+// 둘 다 비우면 인천광역시 전체(서울특별시 전체는 너무 무거워 고르지 않는다).
 const cityOf = (sggnm) => sggnm.split(" ")[0];
 const dongList = () => Object.values(regionIndex).filter((r) => r.level === "dong");
 const opt = (value, text, selected = false) => `<option value="${value}"${selected ? " selected" : ""}>${text}</option>`;
@@ -271,11 +274,14 @@ function fillSido(sido = "") {
 function fillCity(sido, city = "") {
   const sel = $("#pick-city");
   const cities = [...new Set(dongList().filter((d) => d.sido === sido).map((d) => cityOf(d.sggnm)))].sort(collator.compare);
-  sel.innerHTML = opt("", sido === "서울" ? "구" : "시·군") + cities.map((c) => opt(c, c, c === city)).join("");
+  const label = { 서울: "구", 인천: "구·군" }[sido] || "시·군"; // 인천은 비워 두고 확인하면 인천 전체(사용법에 안내)
+  sel.innerHTML = opt("", label) + cities.map((c) => opt(c, c, c === city)).join("");
   sel.disabled = !sido;
 }
 
 const siByName = (name) => Object.values(regionIndex).find((r) => r.level === "si" && r.name === name);
+// 서울특별시·인천광역시처럼 시도 전체가 하나의 시인 경우
+const isMetro = (r) => r.level === "si" && /(특별|광역)시$/.test(r.name);
 
 // 세 번째 상자 값: "si:<시 코드>", "gu:<시군구코드>" 또는 "dong:<행정동코드>"
 function fillDong(sido, city, value = "") {
@@ -302,7 +308,7 @@ function syncPicker(level, code) {
   const r = regionIndex[`${level}:${code}`];
   if (!r) return;
   fillSido(r.sido);
-  if (level === "si" && r.name === "서울특별시") { fillCity(r.sido); fillDong(r.sido, ""); return; }
+  if (isMetro(r)) { fillCity(r.sido); fillDong(r.sido, ""); return; }
   const city = cityOf(level === "dong" ? r.sggnm : r.name);
   // 구가 하나뿐인 시(의정부시 등)는 시 코드와 구 코드가 같아 세 번째 상자의 "○○시 전체"(gu:)로 맞춘다
   const value = level === "si" && r.sggs.length === 1 ? `gu:${code}` : `${level}:${code}`;
@@ -317,9 +323,12 @@ function pickedRegion() {
   if (city) {
     const si = siByName(city);
     if (si) return ["si", si.code]; // 경기 시·군
-    const gu = Object.values(regionIndex).find((r) => r.level === "gu" && r.name === city);
-    if (gu) return ["gu", gu.code]; // 서울의 구
+    const gu = Object.values(regionIndex).find((r) => r.level === "gu" && r.sido === sido && r.name === city);
+    if (gu) return ["gu", gu.code]; // 서울·인천의 구·군
   }
+  // 시도만 고르면 그 시도 전체(인천광역시). 서울특별시 전체는 너무 무거워 고르지 않는다
+  const metro = Object.values(regionIndex).find((r) => isMetro(r) && r.sido === sido);
+  if (metro && metro.code !== SEOUL_SI) return ["si", metro.code];
   return null;
 }
 
@@ -640,28 +649,51 @@ function downloadCsv(regions, filename, onlyRids = null) {
 
 function fmtLen(m) { return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${m}m`; }
 
-// 추정 구간은 실제 도로와 다르므로 노선 색 대신 가는 회색 점선으로 구분한다
+// 직선 추정 구간은 실제 도로와 다르므로 노선 색 대신 가는 회색 점선으로 구분한다
 const EST_STYLE = { color: "#8a96a0", weight: 2, opacity: 0.8, dashArray: "1 5", lineCap: "round" };
+// 도로 기반 추정 구간은 노선 색을 쓰되 흐린 점선으로 그려 실제 경로와 구분한다
+function roadStyle(r) { return { color: TYPE_COLORS[r.typeName] || "#666", weight: 2.5, opacity: 0.55, dashArray: "1 4", lineCap: "round" }; }
 
 function estNote(rid) {
   const pct = data.meta.realPct?.[rid];
   return pct === undefined ? "" : pct === 0 ? " · 추정 경로" : " · 일부 추정";
 }
 
-// 노선 하나를 실제 경로 조각(노선 색)과 추정 조각(회색 점선)으로 나눠 그린다
+// 노선 상세에 붙이는 추정 구간 안내. 실제 경로·도로 기반 추정·직선 추정 비율로 문장을 만든다
+function estDetail(rid) {
+  const real = data.meta.realPct?.[rid];
+  if (real === undefined) return "";
+  const road = data.meta.roadPct?.[rid] || 0, straight = Math.max(0, 100 - real - road);
+  const head = real === 0 ? "API에 쓸 만한 경로 좌표가 없어" : `API 경로 좌표가 일부 구간만 맞아(실제 경로 약 ${real}%)`;
+  const pieces = [
+    road && `약 ${road}%는 정류장 사이를 도로망을 따라 이은 추정 구간(노선 색 점선)`,
+    straight && `약 ${straight}%는 정류장을 직선으로 이은 추정 구간(회색 점선)`,
+  ].filter(Boolean);
+  const body = pieces.length ? `, 경로의 ${pieces.join(", ")}입니다.` : " 정류장을 이은 추정 경로입니다.";
+  const caveat = road ? " 도로 기반 추정은 승용차 도로망 기준이라 버스 전용 구간 등은 실제와 다를 수 있습니다." : "";
+  return `${head}${body}${caveat} 추정 구간은 통과 판정에 쓰지 않습니다.`;
+}
+
+// 노선 하나를 실제 경로 조각(노선 색), 도로 기반 추정 조각(노선 색 흐린 점선), 직선 추정 조각(회색 점선)으로 나눠 그린다
 function routeShape(r) {
-  const parts = routeGeo[r.rid], est = estParts[r.rid];
-  const real = parts.filter((_, i) => !est?.has(i)), guess = parts.filter((_, i) => est?.has(i));
+  const parts = routeGeo[r.rid], est = estParts[r.rid], road = roadParts[r.rid];
+  const kindOf = (i) => (est?.has(i) ? "est" : road?.has(i) ? "road" : "real");
   const group = L.featureGroup();
-  // smoothFactor: 화면 축척에 맞춰 점 수를 줄여 그린다(확대·이동 때 다시 그리는 부담을 줄임)
-  if (real.length) L.polyline(real, { ...baseStyle(r), smoothFactor: 2 }).addTo(group);
-  if (guess.length) L.polyline(guess, { ...EST_STYLE, isEst: true, smoothFactor: 2 }).addTo(group);
+  for (const kind of ["real", "road", "est"]) {
+    const lines = parts.filter((_, i) => kindOf(i) === kind);
+    // smoothFactor: 화면 축척에 맞춰 점 수를 줄여 그린다(확대·이동 때 다시 그리는 부담을 줄임)
+    if (lines.length) L.polyline(lines, { ...partStyle(kind, r), part: kind, smoothFactor: 2 }).addTo(group);
+  }
   return group;
 }
 
+function partStyle(kind, r) { return kind === "est" ? EST_STYLE : kind === "road" ? roadStyle(r) : baseStyle(r); }
+
 // mod: 강조/흐리게 할 때 덮어쓸 스타일 (weight, opacity)
 function styleRoute(group, r, mod = {}) {
-  group.eachLayer((l) => l.setStyle({ ...(l.options.isEst ? EST_STYLE : baseStyle(r)), ...mod }));
+  // 굵게 강조할 때 추정 구간의 점 간격도 늘려야 점선이 실선처럼 뭉개지지 않는다
+  const dots = l => (l.options.part !== "real" && mod.weight ? { dashArray: `1 ${Math.round(mod.weight * 2)}` } : {});
+  group.eachLayer((l) => l.setStyle({ ...partStyle(l.options.part, r), ...mod, ...dots(l) }));
 }
 
 function baseStyle(r) {
@@ -735,9 +767,7 @@ function showDetail(r) {
   const inRegion = (r.sids || []).map((sid) => stations[sid] && { sid, ...stations[sid] }).filter(Boolean);
   const color = TYPE_COLORS[r.typeName] || "#666";
   const where = r.by ? "선택 지역" : "이 지역";
-  const estMsg = estimated.has(r.rid)
-    ? "API에 쓸 만한 경로 좌표가 없어 정류장을 순서대로 이은 추정 경로입니다. 실제 도로와 다를 수 있고 통과 판정에는 쓰지 않습니다."
-    : data.meta.realPct?.[r.rid] !== undefined ? `API 경로 좌표가 일부 구간만 맞아, 경로의 약 ${100 - data.meta.realPct[r.rid]}%는 정류장을 이은 추정 구간(회색 점선)입니다. 추정 구간은 통과 판정에 쓰지 않습니다.` : "";
+  const estMsg = estDetail(r.rid);
   const d = openDetailView(`
     <div class="detail-head">
       <span class="badge big" style="background:${color}">${r.name}</span>
