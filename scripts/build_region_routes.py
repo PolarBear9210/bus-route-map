@@ -3,12 +3,14 @@
 - 정차: 지역 안에 실제 정류장이 하나 이상 있는 노선
   (경로 표시용 가상 지점 "(미정차)"·"(가상)"(서울 API)·"(경유)"(경기 API)는 정차로 치지 않음)
 - 통과: 정차는 없지만 경로선이 지역 안을 MIN_PASS_M 이상 지나는 노선
-- 경로 좌표가 없는 노선은 정류장 좌표를 순서대로 이은 추정 경로를 지도 표시용으로만 만든다(통과 판정에는 쓰지 않음)
+- 경로 좌표가 없는 노선은 정류장 사이를 도로 경로(OSRM, 없으면 직선)로 이은 추정 경로를 지도 표시용으로만 만든다(통과 판정에는 쓰지 않음)
+  단, 경로 출처가 아예 없는 강원 노선(TAGO 정류장만 있음)은 도로 기반 추정 경로로 통과를 판정하고 "추정 판정"으로 표시한다
 - 서울 API와 경기 API 데이터를 노선 ID로 합친다. 같은 노선이 둘 다에 있으면 경기 API의 경로·정류장을 쓴다.
   경기 노선의 이름·유형·면허 시군은 경기 노선 목록(route_list.json) 기준.
 받은 노선 파일 전체를 매번 처음부터 다시 계산하므로, 수집이 늘어나면 다시 실행하면 된다.
 
 사용법: uv run python scripts/build_region_routes.py <서울 수집일 YYYYMMDD> [--gyeonggi <경기 수집일>] [--incheon <TAGO 인천 수집일>]
+        [--gangwon <TAGO 강원 수집일>]  (data/raw/tago/<수집일>/<도시코드>/ 폴더를 모두 읽는다)
 출력: web/data/{region_routes.json, regions_si.geojson, regions_gu.geojson, regions_dong.geojson, bundles/<시군구코드>.json}
       data/processed/{routes.geojson, stations.json} (분석용 전체 파일)
 """
@@ -64,6 +66,12 @@ GG_ROUTE_TYPES = {
 INCHEON_ROUTE_TYPES = {
     "간선버스": "인천일반", "지선버스": "인천일반", "순환버스": "인천일반", "급행버스": "인천일반",
     "좌석버스": "인천좌석", "광역버스": "인천광역", "마을버스": "인천마을", "공항버스": "공항",
+}
+# TAGO 강원 시군 도시코드 → 이름, 노선 유형(routetp) → 화면 유형
+GANGWON_CITIES = {"32010": "춘천", "32020": "원주", "32050": "태백", "32310": "홍천", "32360": "철원"}
+GANGWON_ROUTE_TYPES = {
+    "간선버스": "강원간선", "지선버스": "강원지선", "마을버스": "강원마을",
+    "농어촌(일반)버스": "강원농어촌", "농어촌버스": "강원농어촌", "좌석버스": "강원좌석", "급행버스": "강원좌석",
 }
 INCHEON_FILE = ROOT / "data" / "raw" / "incheon_file"
 TM_MID_TO_WGS = Transformer.from_crs("EPSG:5181", "EPSG:4326", always_xy=True)  # 인천 노드 좌표계(중부원점 TM)
@@ -153,7 +161,7 @@ OSRM_LEGS = load_osrm_legs()
 ROAD_FOR_PASS = False  # 도로 기반 추정 구간을 통과 판정에도 쓸지 (승용차 도로망 기준이라 우선 쓰지 않음)
 
 
-def stitch(parts: list, stations: list[dict]):
+def stitch(parts: list, stations: list[dict], road_for_pass: bool = ROAD_FOR_PASS):
     """정류장 순서(가상 지점 포함)를 뼈대로 경로를 다시 잇는다. 이어진 두 정류장 사이는
     같은 경로 조각 위에 있으면 그 사이의 실제 경로 구간("real"), 아니면 OSRM 도로 경로("road"), 그것도 없으면 직선("straight").
     반환: (지도용 구간 목록 [(LineString, 종류)], 판정용 구간 MultiLineString 또는 None, {종류: 길이 비율 0~1}).
@@ -183,7 +191,7 @@ def stitch(parts: list, stations: list[dict]):
         c = list(seg.coords) if kind != "straight" else [(pa.x, pa.y), (pb.x, pb.y)]
         if c[0] == c[-1]:
             continue
-        if kind == "real" or (kind == "road" and ROAD_FOR_PASS):
+        if kind == "real" or (kind == "road" and road_for_pass):
             judged.append(seg)
         lengths[kind] += LineString(c).length
         if runs and runs[-1][0] == kind:
@@ -276,6 +284,27 @@ def incheon_records(tago_day: str):
         yield route, stations, node_paths.get(rid, [])
 
 
+def gangwon_records(tago_day: str):
+    """강원 노선 → seoul_records와 같은 형태. TAGO 도시별 폴더(collect_tago.py --city)를 모두 읽는다.
+    경로 좌표 출처가 없어 경로는 비워 두고(load_routes가 정류장 사이를 도로 경로로 잇는다), roadJudge로 표시해
+    도로 기반 추정 경로로 통과를 판정하게 한다. 노선·정류장 ID는 TAGO ID를 그대로 쓴다(CCB…)."""
+    base = ROOT / "data" / "raw" / "tago" / tago_day
+    for city_dir in sorted(d for d in base.iterdir() if d.is_dir() and d.name in GANGWON_CITIES):
+        city = GANGWON_CITIES[city_dir.name]
+        for r in json.loads((city_dir / "routes.json").read_text(encoding="utf-8")):
+            rid = r["routeid"]
+            route = {
+                "rid": rid, "name": r["routeno"], "type": f"gw:{r.get('routetp', '')}",
+                "typeName": GANGWON_ROUTE_TYPES.get(r.get("routetp"), "강원"), "city": city,
+                "start": r.get("startnodenm", ""), "end": r.get("endnodenm", ""), "corp": "", "roadJudge": True,
+            }
+            sf = city_dir / "stations" / f"{rid}.json"
+            raw = json.loads(sf.read_text(encoding="utf-8")) if sf.exists() else []
+            stations = [{"sid": s["nodeid"], "ars": str(s.get("nodeno", "")), "name": s["nodenm"],
+                         "seq": int(s["nodeord"]), "x": float(s["gpslong"]), "y": float(s["gpslati"])} for s in raw]
+            yield route, stations, []
+
+
 def gg_route_info(r: dict) -> dict:
     return {
         "rid": str(r["routeId"]), "name": str(r["routeName"]), "type": f"gg{r['routeTypeCd']}",
@@ -284,7 +313,7 @@ def gg_route_info(r: dict) -> dict:
     }
 
 
-def load_routes(day: str, gg_day: str | None, ic_day: str | None = None):
+def load_routes(day: str, gg_day: str | None, ic_day: str | None = None, gw_day: str | None = None):
     records = {route["rid"]: (route, st, pts) for route, st, pts in seoul_records(day)}
     if ic_day:
         # 서울 API에도 있는 인천 노선(38개)은 인천 데이터로 바꾼다. 서울 API의 인천 경로 좌표는 뒤섞였거나 일부만 있다
@@ -312,10 +341,15 @@ def load_routes(day: str, gg_day: str | None, ic_day: str | None = None):
                 route["corp"] = records[route["rid"]][0]["corp"]
             records[route["rid"]] = (route, st, pts)
         print(f"서울 API 노선 {n_seoul}개 + 경기 API 노선 파일 반영 → 합계 {len(records)}개")
+    if gw_day:
+        n = len(records)
+        for route, st, pts in gangwon_records(gw_day):
+            records[route["rid"]] = (route, st, pts)
+        print(f"강원 노선(TAGO) 반영 → {len(records) - n}개 추가, 합계 {len(records)}개")
 
     # lines: 통과 판정용(실제 경로만), draw: 지도 표시용(다시 이은 경로 포함)
     routes, stops, lines, draw = [], [], [], []
-    stitched = []
+    stitched, road_judged = [], []  # road_judged: 도로 기반 추정 경로로 통과를 판정한 노선
     for rid, (route, stations, pts) in records.items():
         pts = [p for p in pts if in_korea(*p)]
         parts = split_at_jumps(pts) if len(pts) >= 2 else []
@@ -334,7 +368,7 @@ def load_routes(day: str, gg_day: str | None, ic_day: str | None = None):
         else:
             # 경로가 없거나, 정류장과 맞지 않는(구간이 빠진) 노선:
             # 정류장 순서를 뼈대로 실제 경로 구간을 이어 붙이고 빈 곳만 직선(추정 구간)으로 채운다
-            segs, real, ratio = stitch(parts, stations)
+            segs, real, ratio = stitch(parts, stations, road_for_pass=ROAD_FOR_PASS or route.get("roadJudge", False))
             if segs:
                 draw.append({"rid": rid, "geometry": MultiLineString([g for g, _ in segs]),
                              "estParts": [i for i, (_, k) in enumerate(segs) if k == "straight"],
@@ -344,7 +378,9 @@ def load_routes(day: str, gg_day: str | None, ic_day: str | None = None):
                 stitched.append((route["name"], round(ratio.get("real", 0) * 100), round(ratio.get("road", 0) * 100)))
         if real is not None:
             lines.append({"rid": rid, "geometry": real})
-        routes.append({**route, "typeName": refine_type(route), "hasPath": real is not None})
+        routes.append({**{k: v for k, v in route.items() if k != "roadJudge"}, "typeName": refine_type(route), "hasPath": real is not None})
+        if route.get("roadJudge") and real is not None:
+            road_judged.append(rid)
 
     print(f"정류장 순서로 경로를 다시 이은 노선 {len(stitched)}개 (실제 경로/도로 기반 추정 비율): "
           f"{', '.join(f'{n} {p}/{r}%' for n, p, r in stitched[:15])}{' …' if len(stitched) > 15 else ''}")
@@ -352,6 +388,7 @@ def load_routes(day: str, gg_day: str | None, ic_day: str | None = None):
     stops = gpd.GeoDataFrame(stops, geometry=gpd.points_from_xy([s["x"] for s in stops], [s["y"] for s in stops]), crs="EPSG:4326")
     lines = gpd.GeoDataFrame(lines, crs="EPSG:4326")
     draw = gpd.GeoDataFrame(draw, geometry="geometry", crs="EPSG:4326")
+    routes.attrs["roadJudged"] = road_judged
     return routes, stops, lines, draw
 
 
@@ -398,7 +435,7 @@ def mins(*vals) -> list[int]:
     return out
 
 
-def build_route_info(rids: set, day: str, gg_day: str | None, ic_day: str | None) -> dict:
+def build_route_info(rids: set, day: str, gg_day: str | None, ic_day: str | None, gw_day: str | None = None) -> dict:
     """노선 상세에 보여줄 기본 정보. 서울 API 값 위에 경기·TAGO 상세 값을 덮어쓴다(값이 있는 항목만).
     hw: 배차간격 분 {wd: 평일, sat: 토, sun: 일} (경기는 [최소, 최대]. peekAlloc·nPeekAlloc은 이름과 달리 첨두/비첨두가 아니라 최소/최대 배차시간), first/last: 기점 출발 첫차·막차,
     first2/last2: 종점 출발 첫차·막차, km: 노선 길이, corp: 운수사"""
@@ -418,8 +455,13 @@ def build_route_info(rids: set, day: str, gg_day: str | None, ic_day: str | None
         merge(r["busRouteId"], hw={"wd": mins(r.get("term"))}, first=hhmm(r.get("firstBusTm")), last=hhmm(r.get("lastBusTm")),
               km=km if km not in ("", "0") else None, corp=clean_corp(r.get("corpNm")))
 
+    tago_info = []
     if ic_day:
-        for f in (ROOT / "data" / "raw" / "tago" / ic_day / "info").glob("*.json"):
+        tago_info += (ROOT / "data" / "raw" / "tago" / ic_day / "info").glob("*.json")
+    if gw_day:
+        tago_info += (ROOT / "data" / "raw" / "tago" / gw_day).glob("32*/info/*.json")
+    if tago_info:
+        for f in tago_info:
             r = json.loads(f.read_text(encoding="utf-8"))
             merge(f.stem, hw={"wd": mins(r.get("intervaltime")), "sat": mins(r.get("intervalsattime")), "sun": mins(r.get("intervalsuntime"))},
                   first=hhmm(r.get("startvehicletime")), last=hhmm(r.get("endvehicletime")))
@@ -439,7 +481,7 @@ def build_si(gu: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """시 단위 경계: 서울·인천은 광역시 하나(서울특별시·인천광역시), 경기는 시·군(수원시처럼 구가 있는 시는 구를 합친다).
     코드는 구가 하나면 그 시군구 코드, 여럿이면 앞 네 자리+0(수원시 41111·41113… → 41110), 서울 11000, 인천 28000.
     sggs: 속한 시군구 코드 목록 — 웹이 시를 고르면 이 구들의 묶음 파일을 읽는다."""
-    metro = {"서울": ("서울특별시", "11000"), "인천": ("인천광역시", "28000")}
+    metro = {"서울": ("서울특별시", "11000"), "인천": ("인천광역시", "28000")}  # 강원은 경기처럼 시·군 단위
     gu = gu.assign(city=[metro[s][0] if s in metro else n.split()[0] for s, n in zip(gu["sido"], gu["sggnm"])])
     groups = gu.groupby("city")["sgg"].apply(sorted)
     si = gu.dissolve(by="city", as_index=False)[["city", "sido", "geometry"]]
@@ -452,7 +494,7 @@ def build_si(gu: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return si.rename(columns={"city": "name"})
 
 
-def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
+def main(day: str, gg_day: str | None, ic_day: str | None, gw_day: str | None = None) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     # 분석 대상 지역 경계 (scripts/extract_regions.py → build_gu.py 결과)
     bver = sorted((ROOT / "data" / "boundary").glob("dong_*.geojson"))[-1].stem.split("_")[-1]
@@ -460,10 +502,10 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
     dong["name"] = dong["adm_nm"].str.split().str[-1]
     gu = gpd.read_file(ROOT / "data" / "boundary" / f"gu_{bver}.geojson")[["sgg", "sggnm", "geometry"]]
     for gdf in (dong, gu):
-        gdf["sido"] = gdf["sgg"].str[:2].map({"11": "서울", "28": "인천", "41": "경기"})
+        gdf["sido"] = gdf["sgg"].str[:2].map({"11": "서울", "28": "인천", "41": "경기", "51": "강원"})
     si = build_si(gu)
 
-    routes, stops, lines, draw = load_routes(day, gg_day, ic_day)
+    routes, stops, lines, draw = load_routes(day, gg_day, ic_day, gw_day)
     print(f"노선 {len(routes)}개(판정용 실제 경로 {len(lines)}, 실제 경로 없이 추정만 {int((draw['realPct'] == 0).sum())}), 실제 정차 정류장 기록 {len(stops)}건")
 
     by_si = classify(si, "code", stops, lines)
@@ -526,7 +568,7 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
     shards = {}
     for rid, g in stops.sort_values("seq").groupby("rid"):
         shards.setdefault(rid[-2:], {}).setdefault(rid, {})["s"] = [[r.sid, r.name, str(r.ars).strip(), round(r.x, 5), round(r.y, 5)] for r in g.itertuples()]
-    route_info = build_route_info(set(routes.index), day, gg_day, ic_day)
+    route_info = build_route_info(set(routes.index), day, gg_day, ic_day, gw_day)
     for rid, info in route_info.items():
         shards.setdefault(rid[-2:], {}).setdefault(rid, {})["i"] = info
     print(f"기본 정보: 배차간격 있음 {sum('hw' in i for i in route_info.values())}개, 운행시간 있음 {sum('first' in i for i in route_info.values())}개 / 노선 {len(routes)}개")
@@ -542,12 +584,14 @@ def main(day: str, gg_day: str | None, ic_day: str | None) -> None:
         gdf.to_file(OUT / f"{name}.geojson", driver="GeoJSON", COORDINATE_PRECISION=5)
 
     meta = {
-        "collectedOn": day, "gyeonggiCollectedOn": gg_day, "incheonCollectedOn": ic_day, "boundaryVersion": bver, "builtAt": datetime.now().isoformat(timespec="seconds"),
+        "collectedOn": day, "gyeonggiCollectedOn": gg_day, "incheonCollectedOn": ic_day, "gangwonCollectedOn": gw_day, "boundaryVersion": bver, "builtAt": datetime.now().isoformat(timespec="seconds"),
         "minPassMeters": MIN_PASS_M, "routeCount": len(routes), "routesWithoutPath": routes.index[~routes["hasPath"]].tolist(),
         # 실제 경로 구간 비율(%)이 100 미만인 노선 — 0이면 경로 전체가 정류장을 이은 추정, 그 사이면 일부 추정
         "realPct": {r["rid"]: int(r["realPct"]) for _, r in draw.iterrows() if r["realPct"] < 100},
         # 추정 구간 중 도로망(OSRM)을 따라 이은 구간의 비율(%) — 나머지 추정 구간은 직선
         "roadPct": {r["rid"]: int(r["roadPct"]) for _, r in draw.iterrows() if r["roadPct"] > 0},
+        # 경로 좌표 출처가 없어 도로 기반 추정 경로로 통과를 판정한 노선(강원 TAGO 노선)
+        "roadJudged": routes.attrs.get("roadJudged", []),
         "routes": routes.drop(columns="hasPath").to_dict(orient="index"),
     }
     (OUT / "region_routes.json").write_text(json.dumps({"meta": meta, "si": by_si, "gu": by_gu, "dong": by_dong}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
@@ -569,5 +613,6 @@ if __name__ == "__main__":
     ap.add_argument("day", help="서울 API 수집일 YYYYMMDD")
     ap.add_argument("--gyeonggi", help="경기 API 수집일 YYYYMMDD")
     ap.add_argument("--incheon", help="TAGO 인천 수집일 YYYYMMDD (scripts/collect_tago.py)")
+    ap.add_argument("--gangwon", help="TAGO 강원 수집일 YYYYMMDD (scripts/collect_tago.py --city 32010 …)")
     args = ap.parse_args()
-    main(args.day, args.gyeonggi, args.incheon)
+    main(args.day, args.gyeonggi, args.incheon, args.gangwon)

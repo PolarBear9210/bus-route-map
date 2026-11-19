@@ -1,13 +1,13 @@
 """경로 좌표가 없는 구간을 도로망을 따라 잇기 위해, OSRM 공개 서버에서 정류장 사이 도로 경로를 받아 저장한다.
 
-대상: 웹 데이터(region_routes.json)에서 추정 구간이 있는 노선(realPct < 100). 지금은 인천시 경로 파일(2024-08)에 없는
-신설·변경 인천 노선이다. 노선마다 정류장 순서(build_region_routes.py가 이어 붙일 때 쓰는 것과 같은 목록)를
+대상: 웹 데이터(region_routes.json)에서 추정 구간이 있는 인천 노선(realPct < 100, 인천시 경로 파일(2024-08)에 없는
+신설·변경 노선)과, 경로 좌표 출처가 없는 강원 노선 전부(--gangwon). 노선마다 정류장 순서(build_region_routes.py가 이어 붙일 때 쓰는 것과 같은 목록)를
 경유지로 보내고, 이어진 두 정류장 사이 구간(leg)을 "정류장id|정류장id" 키로 저장한다. 이미 받은 노선은 건너뛴다.
 
 OSRM 공개 서버(router.project-osrm.org) 이용 정책에 맞춰 초당 1회 이하로 보내고, 대상 노선이 바뀔 때만 다시 실행한다.
 승용차 기준 도로망이라 버스 전용 도로·고속도로 구간은 실제와 다를 수 있다.
 
-사용법: uv run python scripts/route_osrm.py [--limit N]
+사용법: uv run python scripts/route_osrm.py [--gangwon <TAGO 강원 수집일>] [--limit N]
 출력: data/raw/osrm/legs.json, data/raw/osrm/done.json(받은 노선 목록)
 """
 import argparse
@@ -54,7 +54,7 @@ def route_chunk(session, stops):
     raise RuntimeError("OSRM 요청이 계속 거절됨(429)")
 
 
-def main(limit: int | None) -> None:
+def main(limit: int | None, gw_day: str | None = None) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     legs_file, done_file = OUT / "legs.json", OUT / "done.json"
     legs = json.loads(legs_file.read_text(encoding="utf-8")) if legs_file.exists() else {}
@@ -63,10 +63,17 @@ def main(limit: int | None) -> None:
     meta = json.loads((ROOT / "web" / "data" / "region_routes.json").read_text(encoding="utf-8"))["meta"]
     targets = {rid for rid, pct in meta["realPct"].items() if pct < 100}
     stations = {route["rid"]: st for route, st, _ in b.incheon_records(meta["incheonCollectedOn"]) if route["rid"] in targets}
+    n_ic = len(targets)
+    if gw_day:
+        # 강원 노선은 경로 좌표가 아예 없으므로 전처리 결과와 관계없이 모두 대상
+        for route, st, _ in b.gangwon_records(gw_day):
+            targets.add(route["rid"])
+            stations[route["rid"]] = st
     todo = [rid for rid in sorted(targets) if rid not in done and rid in stations]
     if limit:
         todo = todo[:limit]
-    print(f"추정 구간이 있는 노선 {len(targets)}개 중 남은 {len(todo)}개 요청 (인천 외 노선 {len(targets - set(stations))}개는 대상 아님)")
+    print(f"대상 노선 {len(targets)}개(추정 구간 있는 노선 {n_ic}, 강원 {len(targets) - n_ic}) 중 남은 {len(todo)}개 요청"
+          f" (정류장 목록이 없는 노선 {len(targets - set(stations))}개는 제외)")
 
     session = requests.Session()
     kept = dropped = 0
@@ -106,4 +113,6 @@ def main(limit: int | None) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
-    main(ap.parse_args().limit)
+    ap.add_argument("--gangwon", help="TAGO 강원 수집일 YYYYMMDD")
+    a = ap.parse_args()
+    main(a.limit, a.gangwon)

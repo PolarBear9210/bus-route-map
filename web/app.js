@@ -4,7 +4,8 @@ const TYPE_COLORS = {
   공항: "#7c3aed", 심야: "#334155", 투어: "#a16207", "통근버스(서울)": "#1e3a8a",
   경기일반: "#ea580c", 경기좌석: "#be123c", 광역급행: "#db2777", "통근버스(P)": "#4338ca", 예약: "#a21caf", 경기마을: "#65a30d", 똑버스: "#0284c7", 시외: "#78716c",
   인천일반: "#0891b2", 인천좌석: "#0369a1", 인천광역: "#9a3412", 인천마을: "#4d7c0f",
-  경기: "#ea580c", 인천: "#0891b2",
+  강원간선: "#b45309", 강원지선: "#15803d", 강원마을: "#0f766e", 강원농어촌: "#854d0e", 강원좌석: "#9f1239",
+  경기: "#ea580c", 인천: "#0891b2", 강원: "#b45309",
 };
 const TYPE_ORDER = Object.keys(TYPE_COLORS);
 
@@ -73,6 +74,7 @@ async function load() {
   const [rr, si, gu, dong] = await Promise.all([get("region_routes.json"), get("regions_si.geojson"), get("regions_gu.geojson"), get("regions_dong.geojson")]);
   data = rr;
   for (const [rid, pct] of Object.entries(rr.meta.realPct || {})) if (pct === 0 && !rr.meta.roadPct?.[rid]) estimated.add(rid);
+  roadJudgedSet = new Set(rr.meta.roadJudged || []);
   for (const e of Object.values(rr.dong)) for (const [rid, sids] of Object.entries(e.stop)) for (const sid of sids) {
     if (!stationRoutes.has(sid)) stationRoutes.set(sid, new Set());
     stationRoutes.get(sid).add(rid);
@@ -83,7 +85,7 @@ async function load() {
   buildTypeFilters();
   fillSido(); fillCity(""); fillDong("", "");
   const m = data.meta;
-  $("#meta").textContent = `노선 ${m.routeCount}개 · 수집 서울 ${fmtDate(m.collectedOn)}${m.gyeonggiCollectedOn ? `, 경기 ${fmtDate(m.gyeonggiCollectedOn)}` : ""}${m.incheonCollectedOn ? `, 인천 ${fmtDate(m.incheonCollectedOn)}` : ""} · 행정동 경계 ${fmtDate(m.boundaryVersion.replace("ver", ""))} · 통과 기준 ${m.minPassMeters}m 이상`;
+  $("#meta").textContent = `노선 ${m.routeCount}개 · 수집 서울 ${fmtDate(m.collectedOn)}${m.gyeonggiCollectedOn ? `, 경기 ${fmtDate(m.gyeonggiCollectedOn)}` : ""}${m.incheonCollectedOn ? `, 인천 ${fmtDate(m.incheonCollectedOn)}` : ""}${m.gangwonCollectedOn ? `, 강원 ${fmtDate(m.gangwonCollectedOn)}` : ""} · 행정동 경계 ${fmtDate(m.boundaryVersion.replace("ver", ""))} · 통과 기준 ${m.minPassMeters}m 이상`;
   setLevel("gu");
 }
 
@@ -358,6 +360,7 @@ const TYPE_GROUPS = [
   ["서울", ["간선", "지선", "마을", "순환", "광역", "통근버스(서울)", "심야", "투어"]],
   ["경기", ["경기일반", "경기좌석", "경기마을", "통근버스(P)", "예약", "똑버스", "시외", "경기"]],
   ["인천", ["인천일반", "인천좌석", "인천광역", "인천마을", "인천"]],
+  ["강원", ["강원간선", "강원지선", "강원좌석", "강원마을", "강원농어촌", "강원"]],
   ["공통", ["광역급행", "공항"]],
 ];
 
@@ -530,7 +533,7 @@ async function render() {
     const coords = routeGeo[r.rid];
     if (!coords) continue;
     const line = routeShape(r).addTo(routeLayer);
-    line.bindTooltip(`${cityTag(r)}${r.name} · ${r.kind === "stop" ? "정차" : "통과"}${estNote(r.rid)}`, { sticky: true });
+    line.bindTooltip(`${cityTag(r)}${r.name} · ${r.kind === "stop" ? "정차" : "통과"}${estNote(r.rid, r.kind)}`, { sticky: true });
     line.on("click", (e) => { L.DomEvent.stopPropagation(e); showDetail(r); });
     line.on("mouseover", () => {
       // 정류장을 보는 중에는 그 정류장과 관계없는 (흐려진) 노선은 반응하지 않는다
@@ -549,7 +552,7 @@ async function render() {
   drawStations();
 
   const section = (title, list) => list.length
-    ? `<div class="group-title"><span>${title}</span><span class="count">${list.length}</span></div><ul class="routes">${list.map((r) => routeItem(r, noteFor(r, multi, codes.length) + (!routeGeo[r.rid] ? " · 경로 없음" : estNote(r.rid)))).join("")}</ul>`
+    ? `<div class="group-title"><span>${title}</span><span class="count">${list.length}</span></div><ul class="routes">${list.map((r) => routeItem(r, noteFor(r, multi, codes.length) + (!routeGeo[r.rid] ? " · 경로 없음" : estNote(r.rid, r.kind)))).join("")}</ul>`
     : "";
   const shownList = [...vs, ...vp];
   const r0 = regs[0];
@@ -654,9 +657,14 @@ const EST_STYLE = { color: "#8a96a0", weight: 2, opacity: 0.8, dashArray: "1 5",
 // 도로 기반 추정 구간은 노선 색을 쓰되 흐린 점선으로 그려 실제 경로와 구분한다
 function roadStyle(r) { return { color: TYPE_COLORS[r.typeName] || "#666", weight: 2.5, opacity: 0.55, dashArray: "1 4", lineCap: "round" }; }
 
-function estNote(rid) {
+// 경로 좌표 자료가 없어 도로 기반 추정 경로로 통과를 판정한 노선(강원 TAGO 노선)
+const roadJudged = (rid) => roadJudgedSet.has(rid);
+let roadJudgedSet = new Set();
+
+function estNote(rid, kind) {
   const pct = data.meta.realPct?.[rid];
-  return pct === undefined ? "" : pct === 0 ? " · 추정 경로" : " · 일부 추정";
+  const note = pct === undefined ? "" : pct === 0 ? " · 추정 경로" : " · 일부 추정";
+  return note + (kind === "pass" && roadJudged(rid) ? " · 추정 판정" : "");
 }
 
 // 노선 상세에 붙이는 추정 구간 안내. 실제 경로·도로 기반 추정·직선 추정 비율로 문장을 만든다
@@ -671,6 +679,9 @@ function estDetail(rid) {
   ].filter(Boolean);
   const body = pieces.length ? `, 경로의 ${pieces.join(", ")}입니다.` : " 정류장을 이은 추정 경로입니다.";
   const caveat = road ? " 도로 기반 추정은 승용차 도로망 기준이라 버스 전용 구간 등은 실제와 다를 수 있습니다." : "";
+  if (roadJudged(rid)) {
+    return `이 노선은 경로 좌표 자료가 없어${body.replace(/^, /, " ")}${caveat} 통과 판정도 이 추정 경로로 했습니다(추정 판정).`;
+  }
   return `${head}${body}${caveat} 추정 구간은 통과 판정에 쓰지 않습니다.`;
 }
 
