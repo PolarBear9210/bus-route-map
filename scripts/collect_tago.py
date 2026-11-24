@@ -45,8 +45,8 @@ def load_key() -> str:
 def call(session: requests.Session, key: str, op: str, city: int = INCHEON, **params) -> tuple[list[dict], int]:
     for wait in (5, 15, 30, 60, None):
         res = session.get(BASE + op, params={"serviceKey": key, "_type": "json", "cityCode": city, **params}, timeout=60)
-        # 서버 동시 세션이 꽉 찼다는 일시 오류(resultCode 99)나 게이트웨이 시간 초과(5xx)는 잠시 쉬었다가 다시 보낸다
-        if wait and ("가용한 세션" in res.text or res.status_code >= 500):
+        # 서버 동시 세션이 꽉 찼다는 일시 오류(resultCode 99), 게이트웨이 오류(HTTP_ERROR·5xx)는 잠시 쉬었다가 다시 보낸다
+        if wait and ("가용한 세션" in res.text or "HTTP_ERROR" in res.text or res.status_code >= 500):
             time.sleep(wait)
             continue
         break
